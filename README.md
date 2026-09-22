@@ -17,17 +17,110 @@ observation/action 变换、归一化统计、训练配置和服务器端启动�
 双臂策略读取世界相机、左腕相机和右腕相机图像。单臂变换使用七个关节值和一个
 夹爪值。
 
-## 仓库结构
+## 项目边界
+
+本仓库负责**已经完成数采之后、机械臂在线执行之前**的模型训练和 OpenPI 数据协议
+适配。三个相关仓库的边界如下：
 
 ```text
-training/
-  bimanual/       归一化统计工具
-  openpi/         NERO 策略变换和 OpenPI 配置
-  right_arm/      单臂训练入口
+nero_neo_teleop
+  PICO 遥操、CAN/相机采集、生成 LeRobot v3 原始数据
 
-operations/       训练服务器状态检查工具
-docs/             部署文档
+nero_vla_training（本仓库）
+  归一化统计、OpenPI 数据适配、π0.5 训练配置和训练服务器工具
+
+nero_bimanual_control
+  请求推理服务、消费 action chunk、RTC、OSQP、handoff、follower 和 CPV 实机控制
 ```
+
+本仓库中的 `NeroOutputs` 只负责把 OpenPI 输出张量恢复为 NERO action 数据结构，
+不会连接 CAN，也不会控制机械臂。
+
+## 文件架构
+
+### 根目录
+
+| 文件 | 作用 |
+|---|---|
+| `README.md` | 项目边界、文件职责和使用流程，也就是当前文档。 |
+| `pyproject.toml` | Python 项目名称、版本和最低 Python 版本；不负责安装完整 OpenPI 环境。 |
+| `.gitignore` | 排除缓存、日志、数据集、checkpoint 和其他本地产物。 |
+| `LICENSE` | Apache-2.0 许可证。 |
+
+### `training/bimanual/`
+
+| 文件 | 输入 | 输出 | 作用 |
+|---|---|---|---|
+| `compute_nero_bimanual_norm_stats_fast.py` | 已准备好的 LeRobot v2.1 双臂数据集 | OpenPI `norm_stats.json` | 直接读取 Parquet 计算 state/action 统计，不解码视频；关节按 delta action 统计，夹爪保持绝对开度。 |
+
+### `training/openpi/`
+
+这个目录不是完整 OpenPI，也不是机器人控制器，而是需要合并到指定 OpenPI 版本的
+NERO 适配代码。
+
+| 文件 | 作用 |
+|---|---|
+| `config.py` | OpenPI 配置受控副本。增加 NERO 单臂/双臂 `DataConfig`，定义字段重组、delta/absolute action 变换、归一化资产、action horizon、LoRA 参数、数据集和 checkpoint 路径。文件中还保留上游 OpenPI 基础配置及历史 NERO 训练配置。 |
+| `nero_policy.py` | 单臂协议适配。把外部相机、腕部相机和 8 维 state 转换为 OpenPI 输入；把模型 action 截取为 NERO 单臂所需的 8 维。 |
+| `nero_bimanual_policy.py` | 双臂协议适配。把世界相机、左右腕相机和 16 维 state 转换为 OpenPI 输入；把模型 action 截取为双臂所需的 16 维。 |
+
+其中 `config.py` 的关键 NERO 类型是：
+
+| 类型 | 作用 |
+|---|---|
+| `LeRobotNeroDataConfig` | 单臂字段映射以及 7 个关节 delta + 1 个绝对夹爪的变换。 |
+| `LeRobotNeroBimanualDataConfig` | 双臂字段映射以及 `7+1+7+1` action 变换。 |
+| `TrainConfig` | 为具体数据集指定 π0.5 架构、LoRA、horizon、训练步数和保存周期。 |
+
+### `training/right_arm/`
+
+这里保存的是已经验证过的单右臂抓瓶训练入口，不是通用数采代码：
+
+| 文件 | 作用 |
+|---|---|
+| `train_right_bottle_pi05_openpi.py` | 从基础 NERO 单臂配置派生一次隔离的 LoRA 训练；检查数据 schema、action 来源、图像字段和输出目录，再调用 OpenPI 的统计或训练入口。 |
+| `run_right_bottle_pi05_154.sh` | `.154` 训练服务器专用托管脚本；等待数据转换、建立 LeRobot 缓存链接、计算归一化统计、启动训练并记录状态。 |
+
+### `operations/` 与 `docs/`
+
+| 文件 | 作用 |
+|---|---|
+| `operations/check_towel_training.sh` | 只读检查历史双臂毛巾训练的状态文件、进程、GPU、磁盘和日志，不启动或停止训练。 |
+| `docs/TRAINING_SERVER.md` | 训练服务器目录、OpenPI 部署位置和 checkpoint 管理约定。 |
+
+## 调用链
+
+### 训练过程
+
+```text
+LeRobot v2.1 数据集
+  -> compute_nero_bimanual_norm_stats_fast.py 生成归一化统计
+  -> config.py 选择 DataConfig 和 TrainConfig
+  -> NeroInputs / NeroBimanualInputs 重组图像与 state
+  -> DeltaActions 只转换关节维度
+  -> OpenPI 归一化
+  -> π0.5 LoRA 训练
+  -> checkpoint
+```
+
+### 推理服务内部的数据适配
+
+训练和推理必须使用相同的数据协议，所以 OpenPI 服务端也会使用这里的 policy
+transform：
+
+```text
+推理请求中的图像、state、prompt
+  -> NeroBimanualInputs
+  -> OpenPI 归一化
+  -> π0.5 生成 action chunk
+  -> OpenPI 反归一化
+  -> AbsoluteActions 恢复绝对关节目标
+  -> NeroBimanualOutputs 截取 16 个 NERO 有效维度
+  -> 返回 action chunk 给 nero_bimanual_control
+```
+
+从 `nero_bimanual_control` 收到 action chunk 开始，后续 RTC、OSQP、轨迹交接、速度
+跟踪和 CPV 输出全部属于控制仓库，不属于本仓库。
 
 ## OpenPI 集成
 
@@ -39,8 +132,8 @@ docs/             部署文档
 | `training/openpi/nero_policy.py` | `src/openpi/policies/nero_policy.py` |
 | `training/openpi/nero_bimanual_policy.py` | `src/openpi/policies/nero_bimanual_policy.py` |
 
-策略变换负责把 NERO 图像和机器人状态转换为 OpenPI 模型输入，并把模型输出恢复为
-NERO action 向量。
+这些文件必须与部署服务器上的 OpenPI commit 匹配，不能把 `config.py` 覆盖到任意
+OpenPI 版本后直接训练。当前没有自动部署步骤，合并前应先比较上游差异。
 
 ## 归一化
 
