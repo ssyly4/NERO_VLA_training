@@ -5,9 +5,5 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nero-vla-training"
 version = "0.1.0"
-description = "Offline NERO dataset preparation and OpenPI training tools"
+description = "OpenPI training integration for NERO robot datasets"
 requires-python = ">=3.10"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
