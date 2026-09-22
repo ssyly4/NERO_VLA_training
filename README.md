@@ -1,128 +1,237 @@
-# NERO VLA 数据与训练流水线
+# NERO VLA Training
 
-本仓库只负责 NERO 模仿学习的**离线数据处理、OpenPI 适配与模型训练**。
-它不连接机械臂，不发送 CAN/CPV 指令，也不包含 PICO 实时遥操或在线 action
-chunk 消费器。
+NERO 机械臂视觉语言动作模型的数据处理与训练工具集。
 
-## 项目边界
+项目围绕 LeRobot 和 OpenPI 构建，提供从 NERO 遥操作示教数据到 π0.5 LoRA
+checkpoint 的完整离线流程，支持双臂毛巾操作和单右臂抓取任务。
 
-| 项目/目录 | 唯一职责 |
-|---|---|
-| `nero_neo_teleop` | PICO 输入、机械臂遥操、Home、相机与 LeRobot v3 原始数采 |
-| `nero_vla_training` | 数据清理、V3→V2.1、action 标签、归一化、OpenPI 配置与训练 |
-| `nero_bimanual_control` | 在线推理请求、RTC、OSQP/轨迹处理、follower 与 CPV/CAN |
-| `nero_data` | 原始数据、处理后数据和质量报告，不存放代码 |
-| 训练服务器 checkpoint 目录 | 模型参数和训练日志，不提交 Git |
+## 功能
 
-## 目录结构
+- 验证 LeRobot v3 数据集的元数据、Parquet、视频和 episode 对齐关系。
+- 清理录制边界、裁剪任务阶段、抽取子集并合并数据集。
+- 生成可复现的训练集、验证集和测试集划分。
+- 构造 controller-command、next-feedback 等 action 标签。
+- 将 LeRobot v3 转换为 OpenPI 使用的 LeRobot v2.1。
+- 计算 π0.5 action chunk 的归一化统计。
+- 提供 NERO 单臂、双臂 OpenPI transforms 和 LoRA 训练入口。
 
-```text
-nero_vla_training/
-├── data/                   数据集读取、检查和派生
-│   ├── bimanual/           双臂毛巾任务
-│   └── right_arm/          单右臂抓瓶任务
-├── training/               归一化、OpenPI 适配和训练入口
-│   ├── bimanual/
-│   ├── openpi/             部署到 OpenPI 源码树的 NERO 适配文件
-│   └── right_arm/
-├── operations/             训练服务器状态检查，不修改数据或模型
-├── tests/                  纯离线 action/数据语义测试
-└── docs/                   部署和维护说明
-```
-
-## 数据处理文件
-
-### `data/bimanual/`
-
-| 文件 | 功能 |
-|---|---|
-| `nero_validate_bimanual_dataset.py` | 检查 LeRobot v3 元数据、Parquet、视频、episode 和 action 连续性。 |
-| `nero_plan_bimanual_splits.py` | 按固定随机种子生成 train/validation/test 划分和尾段动作统计。 |
-| `nero_subset_lerobot_dataset.py` | 按 episode 无损抽取子集，可重建 next-feedback action 和压缩夹爪闭合过程。 |
-| `nero_clean_preroll_boundary.py` | 修正录制 preroll 边界上的异常 action 标签。 |
-| `nero_crop_bimanual_release_tail.py` | 按双夹爪稳定松开事件裁剪 episode 尾部。 |
-| `nero_merge_lerobot_datasets.py` | 合并 schema 与 action 语义一致的 LeRobot v3 数据集。 |
-| `nero_unify_bimanual_action_labels.py` | 将 command/feedback/Servo 日志统一为明确的双臂 action 定义。 |
-| `nero_action_alignment.py` | action 标签派生和夹爪斜率限制的纯函数。 |
-| `convert_nero_bimanual_v3_to_v21.py` | 将双臂 LeRobot v3 转为 OpenPI 当前固定使用的 v2.1。 |
-| `validate_nero_towel_fullflow70_source.py` | 旧 fullflow70 原始数据的固定验收脚本。 |
-| `validate_nero_towel_fullflow70_v21.py` | 旧 fullflow70 v2.1 派生数据的固定验收脚本。 |
-
-### `data/right_arm/`
-
-| 文件 | 功能 |
-|---|---|
-| `prepare_right_pico_sft.py` | 从右臂原始 v3 数据创建不覆盖源数据的 SFT 副本并校验语义。 |
-| `convert_right_pico_to_openpi_v21.py` | 将右臂 SFT v3 副本转换成 OpenPI v2.1。 |
-
-## 训练文件
-
-| 文件 | 功能 |
-|---|---|
-| `training/bimanual/compute_nero_bimanual_norm_stats_fast.py` | 不解码图像，直接从 Parquet 计算 state/action chunk 归一化统计。 |
-| `training/openpi/config.py` | NERO 训练配置的受控 OpenPI 配置副本；部署时放入 OpenPI 的 `src/openpi/training/config.py`。 |
-| `training/openpi/nero_policy.py` | 单臂 NERO observation/action 与 OpenPI tensor 的变换。 |
-| `training/openpi/nero_bimanual_policy.py` | 双臂 16 维 state/action 和三路图像的 OpenPI 变换。 |
-| `training/right_arm/train_right_bottle_pi05_openpi.py` | 构造右臂 π0.5 LoRA 配置，并执行数据检查、norm stats 或训练。 |
-| `training/right_arm/run_right_bottle_pi05_154.sh` | `.154` 训练服务器上的右臂长任务编排入口。 |
-| `operations/check_towel_training.sh` | 查看毛巾训练状态、checkpoint、GPU、磁盘和日志。 |
-
-`training/openpi/` 中的文件依赖匹配版本的 OpenPI 源码树，不应直接作为本仓库
-Python package 导入。具体部署位置见
-[`docs/TRAINING_SERVER.md`](docs/TRAINING_SERVER.md)。
-
-## 标准数据链路
+## 数据流程
 
 ```text
-nero_neo_teleop 录制 LeRobot v3
-  -> nero_data/raw/<task>/<dataset>
-  -> data/* 验证、清理、裁剪、划分、标签统一
-  -> nero_data/processed/<task>/<derived-v3>
-  -> data/*/convert_*_v3_to_v21.py
-  -> 训练服务器 LeRobot v2.1 数据目录
-  -> training/*/compute_*_norm_stats*.py
-  -> OpenPI π0.5 LoRA training
-  -> 训练服务器 checkpoint
-  -> nero_bimanual_control 通过 policy server 消费模型
+LeRobot v3 demonstrations
+          |
+          v
+validate / clean / subset / merge
+          |
+          v
+ action label construction
+          |
+          v
+ LeRobot v3 -> v2.1
+          |
+          v
+ normalization statistics
+          |
+          v
+  OpenPI pi0.5 LoRA
+          |
+          v
+      checkpoint
 ```
 
-每个派生脚本都应满足两条规则：不原地覆盖源数据；输出目录已存在时直接失败。
-原始数据、视频、缓存、归一化产物和 checkpoint 均被排除在 Git 之外。
+所有转换均生成新的数据集目录，不会修改原始示教数据。
 
-## 示例
+## 数据格式
 
-右臂抓瓶：
+### 双臂
+
+双臂 state/action 为 16 维：
+
+```text
+[left_joint_1 ... left_joint_7, left_gripper,
+ right_joint_1 ... right_joint_7, right_gripper]
+```
+
+支持三路图像：
+
+- `observation.images.world`
+- `observation.images.left_wrist`
+- `observation.images.right_wrist`
+
+### 单右臂
+
+单臂 state/action 为 8 维：
+
+```text
+[joint_1 ... joint_7, gripper]
+```
+
+## 安装与验证
+
+建议使用已有的 LeRobot/OpenPI Python 环境。数据工具需要 Python 3.10+、
+NumPy、PyArrow、PyAV、Pillow 和与数据格式匹配的 LeRobot。训练还需要
+OpenPI、JAX 及其 GPU 环境。
 
 ```bash
-python data/right_arm/prepare_right_pico_sft.py \
-  --source /home/dev/nero_data/raw/bottle_to_box/<raw-v3> \
-  --output /home/dev/nero_data/processed/bottle_to_box/<sft-v3>
+git clone <repository-url>
+cd nero_vla_training
 
-python data/right_arm/convert_right_pico_to_openpi_v21.py \
-  --source /home/dev/nero_data/processed/bottle_to_box/<sft-v3> \
-  --root /home/dev/workspace/nero_training/lerobot_v21 \
-  --repo-id local/<dataset-name>
+python -m compileall -q data training operations tests
+pytest -q tests
 ```
 
-双臂数据基础验证：
+## 双臂训练流程
+
+### 1. 验证 LeRobot v3 数据
 
 ```bash
 python data/bimanual/nero_validate_bimanual_dataset.py \
-  --root /home/dev/nero_data/raw/towel_fold/<dataset> \
-  --repo-id local/<dataset-name>
+  --root /path/to/dataset_v3 \
+  --repo-id local/nero_towel_dataset \
+  --expected-episodes 70
 ```
 
-## 环境与测试
+验证 schema、state/action 维度、episode、视频解码、帧数、时间戳和夹爪 action
+连续性。
 
-数据工具依赖 NumPy、PyArrow、PyAV、Pillow 和与数据版本匹配的 LeRobot。
-训练工具还依赖 OpenPI/JAX 环境。不要在系统 Python 中混装两套 LeRobot；使用
-已经固定的训练环境运行。
+### 2. 生成数据划分
 
 ```bash
-python -m compileall -q data training operations tests
+python data/bimanual/nero_plan_bimanual_splits.py \
+  --source /path/to/dataset_v3 \
+  --output-dir /path/to/split_report \
+  --validation-count 7 \
+  --test-count 7 \
+  --seed 20260826
+```
+
+按照划分结果创建无损 episode 子集：
+
+```bash
+python data/bimanual/nero_subset_lerobot_dataset.py \
+  --source /path/to/dataset_v3 \
+  --output /path/to/train_subset_v3 \
+  --repo-id local/nero_towel_train \
+  --episodes 0,1,2,3,4
+```
+
+视频默认通过硬链接复用，避免重新编码。
+
+### 3. 构造 action 标签
+
+```bash
+python data/bimanual/nero_unify_bimanual_action_labels.py \
+  --source /path/to/dataset_v3 \
+  --output /path/to/labeled_dataset_v3 \
+  --repo-id local/nero_towel_labeled \
+  --mode standardize-command
+```
+
+可用模式和参数以脚本帮助为准：
+
+```bash
+python data/bimanual/nero_unify_bimanual_action_labels.py --help
+```
+
+### 4. 转换为 LeRobot v2.1
+
+```bash
+python data/bimanual/convert_nero_bimanual_v3_to_v21.py \
+  --source /path/to/labeled_dataset_v3 \
+  --root /path/to/lerobot_v21 \
+  --repo-id local/nero_towel_v21 \
+  --action-mode next_feedback_event4
+```
+
+转换器逐 episode 处理 H.264 视频，并保持 state、action、任务文本和 episode
+边界一致。
+
+### 5. 计算归一化统计
+
+```bash
+python training/bimanual/compute_nero_bimanual_norm_stats_fast.py \
+  --dataset /path/to/lerobot_v21/local/nero_towel_v21 \
+  --output /path/to/openpi_assets/local/nero_towel_v21 \
+  --horizon 24
+```
+
+该实现直接读取 Parquet，不解码 RGB 视频。关节 action 按 state 构造 delta，
+夹爪 action 保持绝对开度语义。
+
+### 6. 集成 OpenPI
+
+| 本项目 | OpenPI 目标位置 |
+|---|---|
+| `training/openpi/config.py` | `src/openpi/training/config.py` |
+| `training/openpi/nero_policy.py` | `src/openpi/policies/nero_policy.py` |
+| `training/openpi/nero_bimanual_policy.py` | `src/openpi/policies/nero_bimanual_policy.py` |
+
+`config.py` 包含 NERO 数据配置、action horizon、LoRA、checkpoint 和优化器参数。
+集成前应确认 OpenPI 版本。服务器部署说明见
+[训练服务器文档](docs/TRAINING_SERVER.md)。
+
+## 单右臂训练示例
+
+```bash
+python data/right_arm/prepare_right_pico_sft.py \
+  --source /path/to/right_arm_raw_v3 \
+  --output /path/to/right_arm_sft_v3 \
+  --expected-episodes 60
+
+python data/right_arm/convert_right_pico_to_openpi_v21.py \
+  --source /path/to/right_arm_sft_v3 \
+  --root /path/to/lerobot_v21 \
+  --repo-id local/nero_bottle_right
+```
+
+在已配置的 OpenPI 环境中：
+
+```bash
+python training/right_arm/train_right_bottle_pi05_openpi.py --stage check
+python training/right_arm/train_right_bottle_pi05_openpi.py --stage stats
+python training/right_arm/train_right_bottle_pi05_openpi.py --stage train
+```
+
+## 代码结构
+
+```text
+data/
+  bimanual/       双臂验证、清理、裁剪、划分、标签和格式转换
+  right_arm/      单右臂训练副本和格式转换
+
+training/
+  bimanual/       双臂归一化统计
+  openpi/         NERO OpenPI 配置和 transforms
+  right_arm/      单右臂 pi0.5 训练入口
+
+operations/       训练状态与资源检查
+tests/            数据语义和 action 对齐测试
+docs/             部署说明
+```
+
+## 关键工具
+
+| 工具 | 用途 |
+|---|---|
+| `nero_validate_bimanual_dataset.py` | 完整数据健康检查 |
+| `nero_plan_bimanual_splits.py` | 可复现的数据划分 |
+| `nero_subset_lerobot_dataset.py` | 无损 episode 子集 |
+| `nero_crop_bimanual_release_tail.py` | 按双夹爪松开事件裁剪 |
+| `nero_merge_lerobot_datasets.py` | 合并兼容数据集 |
+| `nero_unify_bimanual_action_labels.py` | 统一 action 标签 |
+| `convert_nero_bimanual_v3_to_v21.py` | 双臂 v3 到 v2.1 |
+| `compute_nero_bimanual_norm_stats_fast.py` | 快速归一化统计 |
+
+## 测试
+
+```bash
 pytest -q tests
 bash -n operations/check_towel_training.sh
 bash -n training/right_arm/run_right_bottle_pi05_154.sh
 ```
 
-本项目原创代码采用 Apache-2.0 许可证。
+测试覆盖 action 派生、夹爪速率限制、任务尾段识别、数据划分和 episode 子集逻辑。
+
+## License
+
+Apache License 2.0.
