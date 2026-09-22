@@ -1,7 +1,7 @@
-"""Register an isolated OpenPI pi0.5 LoRA run for right-arm bottle demos.
+"""为右臂抓瓶示教注册独立的 OpenPI π0.5 LoRA 训练任务。
 
-Run from the pinned OpenPI repository inside the .154 training container.
-The existing OpenPI config.py and earlier checkpoints are left untouched.
+请在 .154 训练容器内固定版本的 OpenPI 仓库中运行。现有 OpenPI config.py 和历史
+checkpoint 均不会被修改。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ ACCUMULATION = 4
 
 
 def configured_run() -> training_config.TrainConfig:
-    """Create a new LoRA run from the proven NERO single-arm base recipe."""
+    """基于已验证的 NERO 单臂基础配置创建新的 LoRA 训练任务。"""
     base = training_config.get_config(BASE_CONFIG)
     config = dataclasses.replace(
         base,
@@ -47,7 +47,7 @@ def configured_run() -> training_config.TrainConfig:
 
 
 def check_dataset(config: training_config.TrainConfig) -> None:
-    """Fail closed on wrong action provenance, dimensions or existing output."""
+    """action 来源、维度或输出目录不符合要求时直接拒绝运行。"""
     manifest = json.loads((DATASET_ROOT / "meta/nero_pi05_sft_manifest.json").read_text())
     info = json.loads((DATASET_ROOT / "meta/info.json").read_text())
     if manifest.get("pi05_sft_ready") is not True:

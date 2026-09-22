@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Compute OpenPI NERO bimanual norm stats without decoding RGB videos."""
+"""无需解码 RGB 视频，直接计算 OpenPI NERO 双臂归一化统计。"""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def main() -> None:
         chunks = actions[indices].copy()
         chunks[..., DELTA_MASK] -= states[:, None, DELTA_MASK]
 
-        # Match the official batch_size=1 RunningStats update order exactly.
+        # 严格保持官方 batch_size=1 RunningStats 的更新顺序。
         for state, chunk in zip(states, chunks, strict=True):
             state_stats.update(state[None, :])
             action_stats.update(chunk[None, :, :])

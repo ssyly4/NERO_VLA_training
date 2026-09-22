@@ -1,52 +1,50 @@
-# NERO VLA Training
+# NERO VLA 训练
 
-OpenPI π0.5 training integration for NERO single-arm and bimanual datasets.
+本仓库提供 NERO 单臂和双臂数据集的 OpenPI π0.5 训练适配，包括
+observation/action 变换、归一化统计、训练配置和服务器端启动工具。示教数据可使用
+[PICO-NEO3-AGILE-ARM-TELEOP](https://github.com/ssyly4/PICO-NEO3-AGILE-ARM-TELEOP)
+中的通用数采入口录制。
 
-This repository provides NERO observation/action transforms, normalization tools,
-training configurations, and server-side launch helpers. Demonstrations can be
-recorded with the configurable collector in
-[PICO-NEO3-AGILE-ARM-TELEOP](https://github.com/ssyly4/PICO-NEO3-AGILE-ARM-TELEOP).
+## 张量定义
 
-## Supported tensors
-
-Bimanual state and action vectors contain 16 values:
+双臂 state 和 action 均为 16 维：
 
 ```text
 [left_joint_1 ... left_joint_7, left_gripper,
  right_joint_1 ... right_joint_7, right_gripper]
 ```
 
-The bimanual policy consumes world, left-wrist, and right-wrist images. The
-single-arm transform uses seven joints plus one gripper value.
+双臂策略读取世界相机、左腕相机和右腕相机图像。单臂变换使用七个关节值和一个
+夹爪值。
 
-## Repository layout
+## 仓库结构
 
 ```text
 training/
-  bimanual/       normalization statistics
-  openpi/         NERO policy transforms and OpenPI configuration
-  right_arm/      single-arm training launcher
+  bimanual/       归一化统计工具
+  openpi/         NERO 策略变换和 OpenPI 配置
+  right_arm/      单臂训练入口
 
-operations/       training-server status helpers
-docs/             deployment notes
+operations/       训练服务器状态检查工具
+docs/             部署文档
 ```
 
-## OpenPI integration
+## OpenPI 集成
 
-Copy or merge the integration files into the matching OpenPI revision:
+将下列适配文件复制或合并到匹配版本的 OpenPI 源码树：
 
-| This repository | OpenPI destination |
+| 本仓库 | OpenPI 目标位置 |
 |---|---|
 | `training/openpi/config.py` | `src/openpi/training/config.py` |
 | `training/openpi/nero_policy.py` | `src/openpi/policies/nero_policy.py` |
 | `training/openpi/nero_bimanual_policy.py` | `src/openpi/policies/nero_bimanual_policy.py` |
 
-The policy transforms map NERO images and robot state into OpenPI model inputs,
-then map model outputs back to NERO action vectors.
+策略变换负责把 NERO 图像和机器人状态转换为 OpenPI 模型输入，并把模型输出恢复为
+NERO action 向量。
 
-## Normalization
+## 归一化
 
-For a prepared LeRobot v2.1 bimanual dataset:
+对于已经准备好的 LeRobot v2.1 双臂数据集：
 
 ```bash
 python training/bimanual/compute_nero_bimanual_norm_stats_fast.py \
@@ -55,17 +53,13 @@ python training/bimanual/compute_nero_bimanual_norm_stats_fast.py \
   --horizon 24
 ```
 
-The tool reads state/action Parquet data without decoding video. Joint actions
-use delta normalization relative to the observation state; grippers retain
-absolute opening values.
+该工具直接读取 state/action Parquet 数据，不解码视频。关节 action 相对 observation
+state 做 delta 归一化，夹爪保持绝对开度定义。
 
-## Training
+## 训练
 
-Run training inside the OpenPI environment after selecting the dataset,
-normalization assets, action horizon, base checkpoint, and output directory in
-the training configuration.
-
-The included launcher demonstrates the three required stages:
+在 OpenPI 环境中配置数据集、归一化资产、action horizon、基础 checkpoint 和输出
+目录后启动训练。现有单臂入口展示了检查、统计和训练三个阶段：
 
 ```bash
 python training/right_arm/train_right_bottle_pi05_openpi.py --stage check
@@ -73,17 +67,16 @@ python training/right_arm/train_right_bottle_pi05_openpi.py --stage stats
 python training/right_arm/train_right_bottle_pi05_openpi.py --stage train
 ```
 
-See [training server deployment](docs/TRAINING_SERVER.md) for the expected
-OpenPI source layout and checkpoint directories.
+服务器目录和 checkpoint 约定见[训练服务器部署](docs/TRAINING_SERVER.md)。
 
-## Validation
+## 验证
 
 ```bash
-python -m compileall -q training operations
+python3 -m compileall -q training operations
 bash -n operations/check_towel_training.sh
 bash -n training/right_arm/run_right_bottle_pi05_154.sh
 ```
 
-## License
+## 许可证
 
-Apache License 2.0.
+Apache License 2.0。

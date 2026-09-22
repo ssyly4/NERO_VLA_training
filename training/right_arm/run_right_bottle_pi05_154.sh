@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Run inside .154's existing OpenPI training container. Never overwrite a run.
+# 在 .154 服务器现有的 OpenPI 训练容器内运行，禁止覆盖已有训练任务。
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TRAIN_ROOT=/home/dev/workspace/nero_training
 OPENPI_ROOT=/home/dev/workspace/openpi_deploy/repos/openpi

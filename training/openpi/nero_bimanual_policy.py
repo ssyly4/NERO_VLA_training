@@ -18,7 +18,7 @@ def _parse_image(image) -> np.ndarray:
 
 @dataclasses.dataclass(frozen=True)
 class NeroBimanualInputs(transforms.DataTransformFn):
-    """Map three-camera, 16-DoF NERO samples to the pi0.5 input schema."""
+    """将三相机、16 自由度 NERO 样本映射到 π0.5 输入结构。"""
 
     model_type: _model.ModelType
 
