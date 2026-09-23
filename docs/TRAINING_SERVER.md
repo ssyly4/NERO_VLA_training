@@ -41,6 +41,34 @@ cd /home/dev/nero_bimanual_control
 ./scripts/run_policy.sh --task towel_fold --preflight-only
 ```
 
+同一训练实验切换 checkpoint 时直接使用 `--checkpoint`。例如把当前毛巾模型从
+`119999` 切到 `96000`：
+
+```bash
+cd /home/dev/nero_bimanual_control
+./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --show-config
+./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --preflight-only
+NERO_POLICY_DURATION=30 \
+./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --execute
+```
+
+跨训练实验切换时，必须同时指定 config 和服务器上的精确 checkpoint 路径。例如启动
+pilot70 的 `95999`：
+
+```bash
+cd /home/dev/nero_bimanual_control
+
+./scripts/run_policy.sh --task towel_fold \
+  --policy-config pi05_nero_towel_fullflow_pilot70_next_feedback_event4_h24_split_v3 \
+  --policy-source /home/dev/workspace/nero_training/checkpoints/pi05_nero_towel_fullflow_pilot70_next_feedback_event4_h24_split_v3/lora_micro96000_towel_fullflow_pilot70_next_feedback_h24_eff4_v3/95999 \
+  --stage-name towel_pilot70_95999 \
+  --preflight-only
+```
+
+确认预检后，将最后的 `--preflight-only` 改成 `--execute`。`--policy-source` 必须是
+服务器绝对路径并以数字 checkpoint 结尾；启动器会拒绝只有 config、没有权重路径的
+不完整覆盖。
+
 预检不会发送机械臂命令。通过后再执行：
 
 ```bash

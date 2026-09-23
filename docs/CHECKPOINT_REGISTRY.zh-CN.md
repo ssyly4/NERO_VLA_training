@@ -43,6 +43,23 @@ pi05_nero_towel_fullflow70_releasecrop_tailpush30_next_feedback_event4_h24_v1/
 lora_micro120000_towel_fullflow70_releasecrop_tailpush30_next_feedback_h24_eff4_v1/119999
 ```
 
+启动默认 `119999`：
+
+```bash
+cd /home/dev/nero_bimanual_control
+./scripts/run_policy.sh --task towel_fold --preflight-only
+NERO_POLICY_DURATION=30 ./scripts/run_policy.sh --task towel_fold --execute
+```
+
+切换同一实验中的 checkpoint，例如 `96000`：
+
+```bash
+cd /home/dev/nero_bimanual_control
+./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --preflight-only
+NERO_POLICY_DURATION=30 \
+./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --execute
+```
+
 ### 双臂叠毛巾：70 条 pilot 历史模型
 
 | 字段 | 值 |
@@ -66,6 +83,17 @@ lora_micro120000_towel_fullflow70_releasecrop_tailpush30_next_feedback_h24_eff4_
 
 `checkpoint_ranking.json` 的前三名为 `95999`、`80000`、`88000`。这是离线指标排名，
 不代替实机安全验收。
+
+启动 `95999` 预检：
+
+```bash
+cd /home/dev/nero_bimanual_control
+./scripts/run_policy.sh --task towel_fold \
+  --policy-config pi05_nero_towel_fullflow_pilot70_next_feedback_event4_h24_split_v3 \
+  --policy-source /home/dev/workspace/nero_training/checkpoints/pi05_nero_towel_fullflow_pilot70_next_feedback_event4_h24_split_v3/lora_micro96000_towel_fullflow_pilot70_next_feedback_h24_eff4_v3/95999 \
+  --stage-name towel_pilot70_95999 \
+  --preflight-only
+```
 
 ## 右臂抓瓶放箱模型
 
