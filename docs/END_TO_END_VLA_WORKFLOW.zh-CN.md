@@ -20,7 +20,7 @@ cd /home/dev/nero_neo_teleop
 
 ```bash
 cd /home/dev/nero_neo_teleop
-./scripts/recording/run_recording.sh \
+./scripts/recording/record_dual.sh \
   --task 'fold the towel' \
   --dataset nero_towel_fullflow_v1 \
   --episodes 70 \
@@ -44,7 +44,8 @@ rsync -a --info=progress2 \
   dev@172.24.1.154:/home/dev/workspace/nero_training/source_v3/nero_towel_fullflow_v1/
 ```
 
-同步转换和归一化工具：
+仍在控制机执行下面的命令，把转换程序和归一化程序部署到训练服务器。这里仅复制
+Python 工具，不读取、不转换数据集：
 
 ```bash
 cd /home/dev/nero_vla_training
@@ -55,6 +56,9 @@ rsync -a \
 ```
 
 ## 5. 转换成 LeRobot v2.1
+
+从这一步开始登录训练服务器。下面的转换程序只执行一次，将第 4 步上传的 LeRobot
+v3 原始数据写成 OpenPI 当前训练环境使用的 LeRobot v2.1 数据集：
 
 ```bash
 ssh dev@172.24.1.154
