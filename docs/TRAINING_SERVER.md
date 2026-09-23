@@ -29,21 +29,21 @@ nvidia-smi
 df -h /home/dev/workspace
 ```
 
-## 启动当前毛巾 Policy
+## 启动右臂抓瓶放箱 Policy
 
 从控制机执行。该命令只负责 staging 和启动模型服务，不访问 CAN、相机或机械臂：
 
 ```bash
 cd /home/dev/nero_bimanual_control
-./scripts/policy_server.sh start --task towel_fold
+./scripts/policy_server.sh start --task bottle_to_box_right
 ```
 
 模型服务启动后，单独执行本机预检和实机控制：
 
 ```bash
-./scripts/run_control.sh --task towel_fold --preflight-only
-NERO_POLICY_DURATION=30 \
-./scripts/run_control.sh --task towel_fold --execute
+./scripts/run_control.sh --task bottle_to_box_right --preflight-only
+NERO_POLICY_DURATION=20 \
+./scripts/run_control.sh --task bottle_to_box_right --execute
 ```
 
 ## 启动其他 checkpoint
@@ -52,10 +52,10 @@ NERO_POLICY_DURATION=30 \
 
 ```bash
 cd /home/dev/nero_bimanual_control
-./scripts/policy_server.sh start --task towel_fold --checkpoint 96000
-./scripts/run_control.sh --task towel_fold --checkpoint 96000 --preflight-only
-NERO_POLICY_DURATION=30 \
-./scripts/run_control.sh --task towel_fold --checkpoint 96000 --execute
+./scripts/policy_server.sh start --task bottle_to_box_right --checkpoint 96000
+./scripts/run_control.sh --task bottle_to_box_right --checkpoint 96000 --preflight-only
+NERO_POLICY_DURATION=20 \
+./scripts/run_control.sh --task bottle_to_box_right --checkpoint 96000 --execute
 ```
 
 服务端和控制端的 `--task`、`--checkpoint` 必须一致，否则控制端会在访问 CAN 前拒绝运行。
