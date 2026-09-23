@@ -115,11 +115,23 @@ cd /home/dev/nero_bimanual_control
 72000 80000  88000  96000  104000 112000 119999
 ```
 
-重要：这个训练配置由
-`training/right_arm/train_right_bottle_pi05_openpi.py` 在进程内动态派生。当前服务器
-全局 `openpi/training/config.py` 中没有注册该名称。因此 checkpoint 存在，控制仓库也有
-preset，但通用 `serve_policy.py policy:checkpoint` 目前不能直接加载它。恢复在线启动前，
-必须将同一配置正式注册到服务器 OpenPI，或提供对应的专用策略服务入口。
+该配置已经正式注册到服务器 OpenPI，可以直接通过控制仓库切换并启动 `119999`。
+
+```bash
+cd /home/dev/nero_bimanual_control
+./scripts/run_policy.sh --task bottle_to_box_right --preflight-only
+NERO_POLICY_DURATION=20 \
+./scripts/run_policy.sh --task bottle_to_box_right --execute
+```
+
+切换同一实验的其他 checkpoint：
+
+```bash
+./scripts/run_policy.sh \
+  --task bottle_to_box_right \
+  --checkpoint 96000 \
+  --preflight-only
+```
 
 ## 历史单右臂抓瓶模型
 

@@ -85,6 +85,7 @@ NERO 适配代码。
 | 文件 | 作用 |
 |---|---|
 | `train_right_bottle_pi05_openpi.py` | 从基础 NERO 单臂配置派生一次隔离的 LoRA 训练；检查数据 schema、action 来源、图像字段和输出目录，再调用 OpenPI 的统计或训练入口。 |
+| `install_bottle_box_config.py` | 将已经训练完成的抓瓶放箱配置幂等注册到服务器 OpenPI `config.py`，供通用 `serve_policy.py` 加载。 |
 | `run_right_bottle_pi05_154.sh` | `.154` 训练服务器专用托管脚本；等待数据转换、建立 LeRobot 缓存链接、计算归一化统计、启动训练并记录状态。 |
 
 ### `operations/` 与 `docs/`
