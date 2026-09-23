@@ -7,6 +7,8 @@ observation/action 变换、归一化统计、训练配置和服务器端启动�
 
 从 PICO、数采、V3→V2.1、归一化、训练到实机执行的完整命令见
 [NERO VLA 命令行全流程](docs/END_TO_END_VLA_WORKFLOW.zh-CN.md)。
+服务器现存模型和 checkpoint 对应关系见
+[checkpoint 注册表](docs/CHECKPOINT_REGISTRY.zh-CN.md)。
 
 ## 张量定义
 

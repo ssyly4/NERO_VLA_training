@@ -313,6 +313,9 @@ ssh dev@172.24.1.154 \
 
 ## 10. 将 checkpoint 配置到在线控制仓库
 
+先在 [checkpoint 注册表](CHECKPOINT_REGISTRY.zh-CN.md)中确认模型的数据语义、horizon、
+可用步数和在线启动状态。
+
 训练结束后，在本机编辑：
 
 ```text
