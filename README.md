@@ -88,11 +88,10 @@ NERO 适配代码。
 | `install_bottle_box_config.py` | 将已经训练完成的抓瓶放箱配置幂等注册到服务器 OpenPI `config.py`，供通用 `serve_policy.py` 加载。 |
 | `run_right_bottle_pi05_154.sh` | `.154` 训练服务器专用托管脚本；等待数据转换、建立 LeRobot 缓存链接、计算归一化统计、启动训练并记录状态。 |
 
-### `operations/` 与 `docs/`
+### `docs/`
 
 | 文件 | 作用 |
 |---|---|
-| `operations/check_towel_training.sh` | 只读检查历史双臂毛巾训练的状态文件、进程、GPU、磁盘和日志，不启动或停止训练。 |
 | `docs/TRAINING_SERVER.md` | 训练服务器目录、OpenPI 部署位置和 checkpoint 管理约定。 |
 
 ## 调用链
@@ -172,8 +171,7 @@ python training/right_arm/train_right_bottle_pi05_openpi.py --stage train
 ## 验证
 
 ```bash
-python3 -m compileall -q training operations
-bash -n operations/check_towel_training.sh
+python3 -m compileall -q training
 bash -n training/right_arm/run_right_bottle_pi05_154.sh
 ```
 
