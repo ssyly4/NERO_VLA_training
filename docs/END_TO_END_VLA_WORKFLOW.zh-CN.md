@@ -99,45 +99,8 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 uv run scripts/train.py pi05_nero_towel_fullflow_v1_h24 --overwrite
 ```
 
-## 8. 启动当前已有毛巾模型
+## 8. 部署与实机运行
 
-回到控制机：
-
-```bash
-cd /home/dev/nero_bimanual_control
-./scripts/policy_server.sh start --task towel_fold
-./scripts/run_control.sh --task towel_fold --preflight-only
-NERO_POLICY_DURATION=30 \
-./scripts/run_control.sh --task towel_fold --execute
-```
-
-## 9. 切换当前模型的 checkpoint
-
-例如使用 `96000`：
-
-```bash
-cd /home/dev/nero_bimanual_control
-./scripts/policy_server.sh start --task towel_fold --checkpoint 96000
-./scripts/run_control.sh --task towel_fold --checkpoint 96000 --preflight-only
-NERO_POLICY_DURATION=30 \
-./scripts/run_control.sh --task towel_fold --checkpoint 96000 --execute
-```
-
-## 10. 停止策略服务
-
-```bash
-cd /home/dev/nero_bimanual_control
-./scripts/policy_server.sh stop
-```
-
-Policy 的其他启动命令见：
-
-```text
-/home/dev/nero_bimanual_control/docs/POLICY_CLI.zh-CN.md
-```
-
-已有 checkpoint 对应关系见：
-
-```text
-/home/dev/nero_vla_training/docs/CHECKPOINT_REGISTRY.zh-CN.md
-```
+训练完成后，模型服务启动、checkpoint 切换、控制端预检和实机运行统一见
+[控制仓库 Policy 命令](https://github.com/ssyly4/Action-chunk-manipulation-control/blob/main/docs/POLICY_CLI.zh-CN.md)。
+已有 checkpoint 对应关系见 [checkpoint 注册表](CHECKPOINT_REGISTRY.zh-CN.md)。
