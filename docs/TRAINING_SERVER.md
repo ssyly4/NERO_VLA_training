@@ -1,107 +1,86 @@
-# 训练服务器部署
+# 训练服务器命令
 
-仓库保存源码，服务器保存环境、数据、日志和 checkpoint。两者不能混在一起提交。
+## 进入服务器
 
-## OpenPI 适配位置
-
-`training/openpi/` 是与当前 OpenPI 版本配套的受控副本，部署目标为：
-
-| 本仓库 | OpenPI 源码树 |
-|---|---|
-| `training/openpi/config.py` | `src/openpi/training/config.py` |
-| `training/openpi/nero_policy.py` | `src/openpi/policies/nero_policy.py` |
-| `training/openpi/nero_bimanual_policy.py` | `src/openpi/policies/nero_bimanual_policy.py` |
-
-部署前必须比较目标 OpenPI commit；不能把这些文件复制到不匹配的上游版本后直接训练。
-
-## 服务器目录
-
-当前脚本默认使用以下服务器约定：
-
-```text
-/home/dev/workspace/openpi_deploy/   OpenPI 工作树与基础权重
-/home/dev/workspace/nero_training/   v2.1 数据、assets、日志和 checkpoints
+```bash
+ssh dev@172.24.1.154
 ```
 
-这些绝对路径是服务器部署契约，不应改成本机 `nero_data` 路径。需要迁移服务器时，
-先统一修改训练入口和 OpenPI 配置，再运行数据验证和 norm stats。
+目录：
 
-`operations/check_towel_training.sh` 只读取状态，不启动或终止训练。
+```text
+/home/dev/workspace/openpi_deploy/repos/openpi   OpenPI
+/home/dev/workspace/nero_training               数据、日志和 checkpoint
+```
 
-现存模型、数据语义、checkpoint 步数和可启动状态见
-[checkpoint 注册表](CHECKPOINT_REGISTRY.zh-CN.md)。
+## 启动训练
 
-## 策略服务启动
+```bash
+cd /home/dev/workspace/openpi_deploy/repos/openpi
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+uv run scripts/train.py <CONFIG_NAME> --overwrite
+```
 
-日常使用不需要登录服务器手动启动。控制机上的正式入口会读取 task TOML，将指定
-checkpoint staging 到容器，并在端口 8000 启动正确的 OpenPI config：
+## 查看训练
+
+```bash
+pgrep -af '[s]cripts/train.py'
+nvidia-smi
+df -h /home/dev/workspace
+```
+
+## 启动当前毛巾 Policy
+
+推荐从控制机执行，脚本会自动 staging 并启动服务器：
 
 ```bash
 cd /home/dev/nero_bimanual_control
 ./scripts/run_policy.sh --task towel_fold --preflight-only
 ```
 
-同一训练实验切换 checkpoint 时直接使用 `--checkpoint`。例如把当前毛巾模型从
-`119999` 切到 `96000`：
+实机运行：
+
+```bash
+NERO_POLICY_DURATION=30 \
+./scripts/run_policy.sh --task towel_fold --execute
+```
+
+## 启动其他 checkpoint
+
+例如 `96000`：
 
 ```bash
 cd /home/dev/nero_bimanual_control
-./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --show-config
 ./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --preflight-only
 NERO_POLICY_DURATION=30 \
 ./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --execute
 ```
 
-跨训练实验切换时，必须同时指定 config 和服务器上的精确 checkpoint 路径。例如启动
-pilot70 的 `95999`：
+## 查看 Policy 服务
 
 ```bash
-cd /home/dev/nero_bimanual_control
-
-./scripts/run_policy.sh --task towel_fold \
-  --policy-config pi05_nero_towel_fullflow_pilot70_next_feedback_event4_h24_split_v3 \
-  --policy-source /home/dev/workspace/nero_training/checkpoints/pi05_nero_towel_fullflow_pilot70_next_feedback_event4_h24_split_v3/lora_micro96000_towel_fullflow_pilot70_next_feedback_h24_eff4_v3/95999 \
-  --stage-name towel_pilot70_95999 \
-  --preflight-only
+ssh dev@172.24.1.154 \
+  "docker exec cuda12_8_torch_2_9_1_core pgrep -af '[s]erve_policy.py'; ss -ltn | grep ':8000'"
 ```
 
-确认预检后，将最后的 `--preflight-only` 改成 `--execute`。`--policy-source` 必须是
-服务器绝对路径并以数字 checkpoint 结尾；启动器会拒绝只有 config、没有权重路径的
-不完整覆盖。
-
-预检不会发送机械臂命令。通过后再执行：
+## 查看 Policy 日志
 
 ```bash
-cd /home/dev/nero_bimanual_control
-NERO_POLICY_DURATION=30 ./scripts/run_policy.sh --task towel_fold --execute
+ssh dev@172.24.1.154 \
+  'find /home/dev/workspace/nero_training/logs -maxdepth 1 -name "*_policy_server.log" -printf "%T@ %p\n" | sort -nr | head'
 ```
 
-自动启动的调用路径是：
+## 停止 Policy 服务
 
-```text
-scripts/run_policy.sh
-  -> config/tasks/towel_fold.toml
-  -> scripts/bimanual_policy/ensure_bimanual_policy_server.sh
-  -> SSH 172.24.1.154
-  -> Docker cuda12_8_torch_2_9_1_core
-  -> /home/dev/workspace/openpi_deploy/repos/openpi/scripts/serve_policy.py
+```bash
+ssh dev@172.24.1.154 \
+  "docker exec cuda12_8_torch_2_9_1_core pkill -f '[s]cripts/serve_policy.py' 2>/dev/null || true"
 ```
 
-### 服务器内手动启动
-
-只有 checkpoint 已经 staging 到容器时才使用手动命令。当前毛巾模型的 staging 路径为：
-
-```text
-/tmp/nero_policy_staging/nero_towel_fullflow70_releasecrop_tailpush30_h24_30000_osqp_casadi
-```
-
-登录并启动：
+## 服务器内手动启动当前模型
 
 ```bash
 ssh dev@172.24.1.154
-
-docker exec cuda12_8_torch_2_9_1_core \
-  pkill -f '[s]cripts/serve_policy.py' 2>/dev/null || true
 
 docker exec -d --user dev \
   -e HOME=/home/dev \
@@ -115,24 +94,11 @@ docker exec -d --user dev \
    > /home/dev/workspace/nero_training/logs/towel_policy_server.log 2>&1"
 ```
 
-检查进程、端口和日志：
+手动命令要求 checkpoint 已经在容器 staging 中。通常直接使用控制机上的
+`run_policy.sh`。
 
-```bash
-docker exec cuda12_8_torch_2_9_1_core pgrep -af '[s]erve_policy.py'
-ss -ltn | grep ':8000'
-tail -n 50 /home/dev/workspace/nero_training/logs/towel_policy_server.log
+已有 checkpoint 列表：
+
+```text
+/home/dev/nero_vla_training/docs/CHECKPOINT_REGISTRY.zh-CN.md
 ```
-
-停止本项目推理服务：
-
-```bash
-docker exec cuda12_8_torch_2_9_1_core \
-  pkill -f '[s]cripts/serve_policy.py' 2>/dev/null || true
-```
-
-如果 staging 不存在，不要手工复制零散文件；回到控制机使用
-`run_policy.sh --preflight-only`，由 `ensure_bimanual_policy_server.sh` 原子化 staging。
-
-历史流水线使用过不同 action 定义和 horizon，不能仅凭目录名恢复训练。每次训练必须
-同时记录数据集 repo id、action 定义、horizon、microbatch、梯度累计、基础权重和
-OpenPI commit。
