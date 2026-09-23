@@ -5,6 +5,9 @@ observation/action 变换、归一化统计、训练配置和服务器端启动�
 [PICO-NEO3-AGILE-ARM-TELEOP](https://github.com/ssyly4/PICO-NEO3-AGILE-ARM-TELEOP)
 中的通用数采入口录制。
 
+从 PICO、数采、V3→V2.1、归一化、训练到实机执行的完整命令见
+[NERO VLA 命令行全流程](docs/END_TO_END_VLA_WORKFLOW.zh-CN.md)。
+
 ## 张量定义
 
 双臂 state 和 action 均为 16 维：
@@ -51,6 +54,7 @@ nero_bimanual_control
 
 | 文件 | 输入 | 输出 | 作用 |
 |---|---|---|---|
+| `convert_nero_bimanual_v3_to_v21.py` | LeRobot v3 双臂数据集 | OpenPI 固定版本使用的 LeRobot v2.1 数据集 | 保留三路 H.264 视频、16 维 state/action、episode 边界与任务文本，并拒绝覆盖已有输出。 |
 | `compute_nero_bimanual_norm_stats_fast.py` | 已准备好的 LeRobot v2.1 双臂数据集 | OpenPI `norm_stats.json` | 直接读取 Parquet 计算 state/action 统计，不解码视频；关节按 delta action 统计，夹爪保持绝对开度。 |
 
 ### `training/openpi/`
