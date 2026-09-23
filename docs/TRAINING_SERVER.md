@@ -31,18 +31,19 @@ df -h /home/dev/workspace
 
 ## 启动当前毛巾 Policy
 
-推荐从控制机执行，脚本会自动 staging 并启动服务器：
+从控制机执行。该命令只负责 staging 和启动模型服务，不访问 CAN、相机或机械臂：
 
 ```bash
 cd /home/dev/nero_bimanual_control
-./scripts/run_policy.sh --task towel_fold --preflight-only
+./scripts/policy_server.sh start --task towel_fold
 ```
 
-实机运行：
+模型服务启动后，单独执行本机预检和实机控制：
 
 ```bash
+./scripts/run_control.sh --task towel_fold --preflight-only
 NERO_POLICY_DURATION=30 \
-./scripts/run_policy.sh --task towel_fold --execute
+./scripts/run_control.sh --task towel_fold --execute
 ```
 
 ## 启动其他 checkpoint
@@ -51,16 +52,19 @@ NERO_POLICY_DURATION=30 \
 
 ```bash
 cd /home/dev/nero_bimanual_control
-./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --preflight-only
+./scripts/policy_server.sh start --task towel_fold --checkpoint 96000
+./scripts/run_control.sh --task towel_fold --checkpoint 96000 --preflight-only
 NERO_POLICY_DURATION=30 \
-./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --execute
+./scripts/run_control.sh --task towel_fold --checkpoint 96000 --execute
 ```
+
+服务端和控制端的 `--task`、`--checkpoint` 必须一致，否则控制端会在访问 CAN 前拒绝运行。
 
 ## 查看 Policy 服务
 
 ```bash
-ssh dev@172.24.1.154 \
-  "docker exec cuda12_8_torch_2_9_1_core pgrep -af '[s]erve_policy.py'; ss -ltn | grep ':8000'"
+cd /home/dev/nero_bimanual_control
+./scripts/policy_server.sh status
 ```
 
 ## 查看 Policy 日志
@@ -73,29 +77,12 @@ ssh dev@172.24.1.154 \
 ## 停止 Policy 服务
 
 ```bash
-ssh dev@172.24.1.154 \
-  "docker exec cuda12_8_torch_2_9_1_core pkill -f '[s]cripts/serve_policy.py' 2>/dev/null || true"
+cd /home/dev/nero_bimanual_control
+./scripts/policy_server.sh stop
 ```
 
-## 服务器内手动启动当前模型
-
-```bash
-ssh dev@172.24.1.154
-
-docker exec -d --user dev \
-  -e HOME=/home/dev \
-  -e PYTHONUNBUFFERED=1 \
-  cuda12_8_torch_2_9_1_core bash -lc \
-  "cd /home/dev/workspace/openpi_deploy/repos/openpi && \
-   exec uv run scripts/serve_policy.py --port 8000 \
-   policy:checkpoint \
-   --policy.config=pi05_nero_towel_fullflow70_releasecrop_tailpush30_next_feedback_event4_h24_v1 \
-   --policy.dir=/tmp/nero_policy_staging/nero_towel_fullflow70_releasecrop_tailpush30_h24_30000_osqp_casadi \
-   > /home/dev/workspace/nero_training/logs/towel_policy_server.log 2>&1"
-```
-
-手动命令要求 checkpoint 已经在容器 staging 中。通常直接使用控制机上的
-`run_policy.sh`。
+不要手动运行 `docker exec ... serve_policy.py`。模型 staging、旧服务停止和新服务启动
+统一由 `policy_server.sh` 管理，避免容器模型与控制端期望不一致。
 
 已有 checkpoint 列表：
 

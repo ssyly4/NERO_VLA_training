@@ -105,9 +105,10 @@ uv run scripts/train.py pi05_nero_towel_fullflow_v1_h24 --overwrite
 
 ```bash
 cd /home/dev/nero_bimanual_control
-./scripts/run_policy.sh --task towel_fold --preflight-only
+./scripts/policy_server.sh start --task towel_fold
+./scripts/run_control.sh --task towel_fold --preflight-only
 NERO_POLICY_DURATION=30 \
-./scripts/run_policy.sh --task towel_fold --execute
+./scripts/run_control.sh --task towel_fold --execute
 ```
 
 ## 9. 切换当前模型的 checkpoint
@@ -116,16 +117,17 @@ NERO_POLICY_DURATION=30 \
 
 ```bash
 cd /home/dev/nero_bimanual_control
-./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --preflight-only
+./scripts/policy_server.sh start --task towel_fold --checkpoint 96000
+./scripts/run_control.sh --task towel_fold --checkpoint 96000 --preflight-only
 NERO_POLICY_DURATION=30 \
-./scripts/run_policy.sh --task towel_fold --checkpoint 96000 --execute
+./scripts/run_control.sh --task towel_fold --checkpoint 96000 --execute
 ```
 
 ## 10. 停止策略服务
 
 ```bash
-ssh dev@172.24.1.154 \
-  "docker exec cuda12_8_torch_2_9_1_core pkill -f '[s]cripts/serve_policy.py' 2>/dev/null || true"
+cd /home/dev/nero_bimanual_control
+./scripts/policy_server.sh stop
 ```
 
 Policy 的其他启动命令见：
