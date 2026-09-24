@@ -7,6 +7,8 @@ observation/action 变换、归一化统计、训练配置和服务器端启动�
 
 从 PICO、数采、V3→V2.1、归一化、训练到实机执行的完整命令见
 [NERO VLA 命令行全流程](docs/END_TO_END_VLA_WORKFLOW.zh-CN.md)。
+官方 π0.5 的源码与权重获取过程，以及 NERO 对 OpenPI 的四项必要扩展，见
+[OpenPI π0.5 来源与 NERO 必要扩展](docs/OPENPI_PI05_SOURCE_AND_NERO_EXTENSIONS.zh-CN.md)。
 服务器现存模型和 checkpoint 对应关系见
 [checkpoint 注册表](docs/CHECKPOINT_REGISTRY.zh-CN.md)。
 
@@ -93,6 +95,7 @@ NERO 适配代码。
 | 文件 | 作用 |
 |---|---|
 | `docs/TRAINING_SERVER.md` | 训练服务器目录、OpenPI 部署位置和 checkpoint 管理约定。 |
+| `docs/OPENPI_PI05_SOURCE_AND_NERO_EXTENSIONS.zh-CN.md` | 官方 π0.5 拉取、安装、基础权重下载，以及 NERO 必要源码扩展。 |
 
 ## 调用链
 
