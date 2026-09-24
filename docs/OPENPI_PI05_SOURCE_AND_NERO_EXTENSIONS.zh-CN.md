@@ -58,7 +58,59 @@ ssh dev@172.24.1.154
 mkdir -p /home/dev/workspace/openpi_deploy/{repos,checkpoints,logs,scripts,runtime,tmp}
 ```
 
-### 2.2 拉取并固定官方源码
+### 2.2 创建最小 GPU 容器
+
+当前验证环境使用：
+
+```text
+image tag  swg/cuda128_work:latest
+image id   sha256:af263eb42de3862cd23a5b3c7062e36a6edea87d162002949829b9d386af6561
+CUDA       12.8.1
+GPU        all
+network    host
+shm        2 GiB
+```
+
+该镜像没有 registry digest，是当前服务器上的本地镜像。只在同一台服务器新建容器时，
+可以直接运行：
+
+```bash
+docker run -d \
+  --name nero_openpi_core \
+  --runtime=nvidia \
+  --gpus all \
+  --network host \
+  --shm-size 2g \
+  --user "$(id -u dev):$(id -g dev)" \
+  -e HOME=/home/dev \
+  -e NVIDIA_DISABLE_REQUIRE=1 \
+  -e LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/nvidia/current:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
+  -v /home/dev/workspace:/home/dev/workspace \
+  -w /home/dev/workspace/openpi_deploy/repos/openpi \
+  swg/cuda128_work:latest \
+  sleep infinity
+```
+
+验证：
+
+```bash
+docker exec nero_openpi_core nvidia-smi
+docker exec nero_openpi_core python3 --version
+docker exec nero_openpi_core python3 -c \
+  'import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))'
+```
+
+最后一条必须显示 `True`。这台服务器是 RTX 3090、550 系列驱动，而镜像内还带有更新的
+CUDA compatibility `libcuda`。显式把宿主机驱动目录放在 `LD_LIBRARY_PATH` 最前面，可以
+避免新容器出现 CUDA error 804。上述最小启动参数已经在临时容器中验证 GPU 可用。
+
+NERO 核心训练不需要复制当前生产容器全部挂载。`/home/dev/.ssh`、Docker socket、X11、
+`/dev` 等挂载与基础训练和推理服务无关，最小容器只共享 `/home/dev/workspace`。
+
+如果在另一台服务器部署，需要先提供兼容 CUDA 12.8、JAX 和 Python 3.11+ 的镜像，或者
+把当前本地镜像导出/导入；不能只依赖 `swg/cuda128_work:latest` 这个本地 tag。
+
+### 2.3 拉取并固定官方源码
 
 为保证与现有 checkpoint 和 NERO 修改兼容，必须固定到当前验证过的 commit，不能直接
 使用未来的 `main`：
@@ -85,19 +137,70 @@ git submodule status --recursive
 15a9616a00943ada6c20a0f158e3adb39df2ccac
 ```
 
-### 2.3 在 GPU 容器中安装环境
+### 2.4 获取并应用 NERO 核心补丁
 
-服务器使用容器：
+在服务器上拉取本仓库：
+
+```bash
+cd /home/dev/workspace
+git clone https://github.com/ssyly4/NERO_VLA_training.git nero_vla_training
+```
+
+补丁严格以 OpenPI `15a9616` 为基线，包含本文第 3 节说明的四项核心能力：
 
 ```text
-cuda12_8_torch_2_9_1_core
+/home/dev/workspace/nero_vla_training/server/openpi/nero_openpi_core_15a9616.patch
+```
+
+推荐使用带基线检查的脚本：
+
+```bash
+bash /home/dev/workspace/nero_vla_training/server/openpi/apply_openpi_core.sh \
+  /home/dev/workspace/openpi_deploy/repos/openpi
+```
+
+也可以手动执行，以便逐步观察：
+
+```bash
+cd /home/dev/workspace/openpi_deploy/repos/openpi
+
+git rev-parse HEAD
+git apply --check \
+  /home/dev/workspace/nero_vla_training/server/openpi/nero_openpi_core_15a9616.patch
+git apply \
+  /home/dev/workspace/nero_vla_training/server/openpi/nero_openpi_core_15a9616.patch
+git status --short
+```
+
+补丁的 SHA-256 是：
+
+```text
+80e37153cdf09b8c36885c14d1440f5ffabfae9a7644194a40ff4a12b938f426
+```
+
+校验：
+
+```bash
+sha256sum \
+  /home/dev/workspace/nero_vla_training/server/openpi/nero_openpi_core_15a9616.patch
+```
+
+如果 `apply_openpi_core.sh` 输出 `already applied`，说明目标源码已经具备这组修改，不要
+重复执行 `git apply`。
+
+### 2.5 在 GPU 容器中安装环境
+
+后续命令使用第 2.2 节创建的容器：
+
+```text
+nero_openpi_core
 ```
 
 宿主机的 OpenPI 目录在容器中使用相同路径。以 editable 模式安装后，容器运行时读取的
 就是该源码树：
 
 ```bash
-docker exec -i cuda12_8_torch_2_9_1_core bash -lc '
+docker exec -i nero_openpi_core bash -lc '
   cd /home/dev/workspace/openpi_deploy/repos/openpi
   GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 '
@@ -106,11 +209,14 @@ docker exec -i cuda12_8_torch_2_9_1_core bash -lc '
 如果服务器访问 GitHub 依赖需要本机代理，实际部署使用过：
 
 ```bash
-http_proxy=http://127.0.0.1:7897 \
-https_proxy=http://127.0.0.1:7897 \
-all_proxy=socks5h://127.0.0.1:7897 \
-GIT_LFS_SKIP_SMUDGE=1 \
-uv pip install -e .
+docker exec -i nero_openpi_core bash -lc '
+  cd /home/dev/workspace/openpi_deploy/repos/openpi
+  http_proxy=http://127.0.0.1:7897 \
+  https_proxy=http://127.0.0.1:7897 \
+  all_proxy=socks5h://127.0.0.1:7897 \
+  GIT_LFS_SKIP_SMUDGE=1 \
+  uv pip install -e .
+'
 ```
 
 官方 `pyproject.toml` 会继续获取固定版本的依赖，其中包括：
@@ -123,13 +229,13 @@ dlimp    ad72ce3a9b414db2185bc0b38461d4101a65477a
 验证 Python、JAX 和 GPU：
 
 ```bash
-docker exec -i cuda12_8_torch_2_9_1_core bash -lc '
+docker exec -i nero_openpi_core bash -lc '
   cd /home/dev/workspace/openpi_deploy/repos/openpi
   uv run python -c "import openpi, jax; print(jax.devices())"
 '
 ```
 
-### 2.4 下载官方 π0.5 基础权重
+### 2.6 下载官方 π0.5 基础权重
 
 源码和模型权重是两个独立来源：
 
@@ -147,7 +253,7 @@ export OPENPI_DATA_HOME=/home/dev/workspace/openpi_deploy/checkpoints
 使用 OpenPI 自带下载器获取训练需要的 `params` 和 `assets`：
 
 ```bash
-docker exec -i cuda12_8_torch_2_9_1_core bash -lc '
+docker exec -i nero_openpi_core bash -lc '
   cd /home/dev/workspace/openpi_deploy/repos/openpi
   export OPENPI_DATA_HOME=/home/dev/workspace/openpi_deploy/checkpoints
   uv run python -c "
@@ -175,6 +281,33 @@ print(download.maybe_download(
 ```text
 /home/dev/workspace/nero_training/checkpoints
 ```
+
+### 2.7 验证四项核心能力
+
+补丁应用且 `uv pip install -e .` 完成后，在 GPU 容器中运行：
+
+```bash
+docker exec -i nero_openpi_core bash -lc '
+  cd /home/dev/workspace/nero_vla_training
+  ./server/openpi/verify_openpi_core.sh \
+    /home/dev/workspace/openpi_deploy/repos/openpi
+'
+```
+
+通过时输出：
+
+```text
+NERO_OPENPI_CORE_VERIFICATION_PASSED
+features=data_adapter,rtc,episode_split,gradient_accumulation
+```
+
+这个检查会实际导入 OpenPI，并确认：
+
+1. NERO 单臂和双臂 transform 可导入；
+2. `Policy.infer()` 和 `Pi0.sample_actions()` 接受 RTC 参数；
+3. RTC guidance 函数存在；
+4. episode split 字段和索引修复函数存在；
+5. `TrainConfig` 支持梯度累积。
 
 ## 3. NERO 对官方源码的四项必要扩展
 
@@ -348,14 +481,35 @@ effective_batch_size = micro_batch_size * gradient_accumulation_steps
 |---|---|
 | OpenPI、π0.5、PaliGemma/SigLIP、flow matching | 官方 OpenPI commit `15a9616` |
 | π0.5 基础权重 | `gs://openpi-assets/checkpoints/pi05_base` |
-| NERO 8D/16D 输入输出适配 | OpenPI 服务器工作树中的 NERO 新增代码 |
-| 模型侧 RTC guidance | OpenPI 服务器工作树中的 NERO 新增代码 |
-| episode split 加载 | OpenPI 服务器工作树中的 NERO 修改 |
-| 梯度累积 | OpenPI 服务器工作树中的 NERO 修改 |
+| NERO 8D/16D 输入输出适配 | `nero_openpi_core_15a9616.patch` |
+| 模型侧 RTC guidance | `nero_openpi_core_15a9616.patch` |
+| episode split 加载 | `nero_openpi_core_15a9616.patch` |
+| 梯度累积 | `nero_openpi_core_15a9616.patch` |
 | NERO LoRA checkpoint | `/home/dev/workspace/nero_training/checkpoints` |
 | action chunk 控制、OSQP、handoff、follower、CPV | 控制机 `nero_bimanual_control`，不在 OpenPI 内 |
 
-## 5. 当前复现风险
+## 5. 从空环境到可运行核心的最短顺序
+
+```text
+1. 创建 openpi_deploy 目录
+2. 创建并验证最小 GPU 容器
+3. clone 官方 OpenPI
+4. checkout 15a9616
+5. 初始化 submodule
+6. clone NERO_VLA_training
+7. apply_openpi_core.sh
+8. 在 GPU 容器中 uv pip install -e .
+9. 下载 pi05_base params 和 assets
+10. verify_openpi_core.sh
+11. 准备 LeRobot v2.1 数据与 norm_stats
+12. 选择 NERO TrainConfig 并运行 scripts/train.py
+13. 使用 scripts/serve_policy.py 加载训练 checkpoint
+```
+
+完成第 10 步意味着 OpenPI 核心扩展已经可用；第 11～13 步依赖具体任务的数据集、归一化
+资产和 checkpoint，不属于基础环境安装。
+
+## 6. 当前服务器与复现边界
 
 服务器 OpenPI 目前仍是“官方 commit + 未提交工作区修改”。以下命令可以查看边界：
 
@@ -365,8 +519,10 @@ git status --short
 git diff --stat
 ```
 
-因此当前只执行官方 clone 和权重下载，只能恢复基础 π0.5，不能恢复 NERO 的四项扩展。
-在建立新的训练服务器前，必须先把上述必要修改整理成受版本控制的补丁或独立分支，并以
-`15a9616` 为明确基线。不要直接对当前工作树执行 `git reset --hard`、`git clean` 或覆盖式
-`git pull`。
+本仓库的 `server/openpi/nero_openpi_core_15a9616.patch` 已经保存四项必要修改，并在干净
+的 `15a9616` worktree 上通过 `git apply --check` 和 Python 语法编译。它不包含服务器上的
+LIBERO GUI 调试代码、备份文件和其他非必要修改。
 
+当前生产服务器工作树仍有额外未提交内容，因此不要在生产目录执行 `git reset --hard`、
+`git clean` 或覆盖式 `git pull`。新容器应从干净 clone 开始应用补丁，而不是复制生产工作
+树的全部杂项。

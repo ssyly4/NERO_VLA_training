@@ -1,0 +1,1450 @@
+diff --git a/scripts/train.py b/scripts/train.py
+index 5d28941..ea7e9f6 100644
+--- a/scripts/train.py
++++ b/scripts/train.py
+@@ -86,6 +86,12 @@ def init_train_state(
+     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
+ ) -> tuple[training_utils.TrainState, Any]:
+     tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
++    if config.gradient_accumulation_steps > 1:
++        tx = optax.MultiSteps(
++            tx,
++            every_k_schedule=config.gradient_accumulation_steps,
++            use_grad_mean=True,
++        )
+ 
+     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
+         rng, model_rng = jax.random.split(rng)
+@@ -225,6 +231,12 @@ def main(config: _config.TrainConfig):
+     data_iter = iter(data_loader)
+     batch = next(data_iter)
+     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
++    logging.info(
++        "micro_batch_size=%d gradient_accumulation_steps=%d effective_batch_size=%d",
++        config.batch_size,
++        config.gradient_accumulation_steps,
++        config.batch_size * config.gradient_accumulation_steps,
++    )
+ 
+     # Log images from first batch to sanity check.
+     images_to_log = [
+diff --git a/src/openpi/models/pi0.py b/src/openpi/models/pi0.py
+index ae7c459..608869b 100644
+--- a/src/openpi/models/pi0.py
++++ b/src/openpi/models/pi0.py
+@@ -9,6 +9,7 @@ from typing_extensions import override
+ 
+ from openpi.models import model as _model
+ from openpi.models import pi0_config
++from openpi.models import rtc as _rtc
+ import openpi.models.gemma as _gemma
+ import openpi.models.siglip as _siglip
+ from openpi.shared import array_typing as at
+@@ -221,6 +222,10 @@ class Pi0(_model.BaseModel):
+         *,
+         num_steps: int | at.Int[at.Array, ""] = 10,
+         noise: at.Float[at.Array, "b ah ad"] | None = None,
++        prev_chunk_left_over: at.Float[at.Array, "b ph ad"] | None = None,
++        inference_delay: int | at.Int[at.Array, ""] = 0,
++        execution_horizon: int | at.Int[at.Array, ""] = 10,
++        rtc_max_guidance_weight: float = 10.0,
+     ) -> _model.Actions:
+         observation = _model.preprocess_observation(None, observation, train=False)
+         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
+@@ -238,35 +243,42 @@ class Pi0(_model.BaseModel):
+ 
+         def step(carry):
+             x_t, time = carry
+-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+-                observation, x_t, jnp.broadcast_to(time, batch_size)
+-            )
+-            # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
+-            # other
+-            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+-            # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
+-            # prefix tokens
+-            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+-            # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
+-            # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
+-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+-            assert full_attn_mask.shape == (
+-                batch_size,
+-                suffix_tokens.shape[1],
+-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
+-            )
+-            # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
+-            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+-
+-            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+-                [None, suffix_tokens],
+-                mask=full_attn_mask,
+-                positions=positions,
+-                kv_cache=kv_cache,
+-                adarms_cond=[None, adarms_cond],
+-            )
+-            assert prefix_out is None
+-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
++            def denoise_velocity(input_x_t):
++                suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
++                    observation, input_x_t, jnp.broadcast_to(time, batch_size)
++                )
++                suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
++                suffix_prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
++                full_attn_mask = jnp.concatenate([suffix_prefix_attn_mask, suffix_attn_mask], axis=-1)
++                assert full_attn_mask.shape == (
++                    batch_size,
++                    suffix_tokens.shape[1],
++                    prefix_tokens.shape[1] + suffix_tokens.shape[1],
++                )
++                positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
++
++                (prefix_out, suffix_out), _ = self.PaliGemma.llm(
++                    [None, suffix_tokens],
++                    mask=full_attn_mask,
++                    positions=positions,
++                    kv_cache=kv_cache,
++                    adarms_cond=[None, adarms_cond],
++                )
++                assert prefix_out is None
++                return self.action_out_proj(suffix_out[:, -self.action_horizon :])
++
++            if prev_chunk_left_over is None:
++                v_t = denoise_velocity(x_t)
++            else:
++                v_t = _rtc.guided_velocity(
++                    denoise_velocity,
++                    x_t,
++                    prev_chunk_left_over,
++                    inference_delay=inference_delay,
++                    execution_horizon=execution_horizon,
++                    time=time,
++                    max_guidance_weight=rtc_max_guidance_weight,
++                )
+ 
+             return x_t + dt * v_t, time + dt
+ 
+diff --git a/src/openpi/policies/policy.py b/src/openpi/policies/policy.py
+index b9b708b..36d2141 100644
+--- a/src/openpi/policies/policy.py
++++ b/src/openpi/policies/policy.py
+@@ -65,10 +65,27 @@ class Policy(BasePolicy):
+             self._rng = rng or jax.random.key(0)
+ 
+     @override
+-    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
++    def infer(
++        self,
++        obs: dict,
++        *,
++        noise: np.ndarray | None = None,
++        prev_chunk_left_over: np.ndarray | None = None,
++        inference_delay: int = 0,
++        execution_horizon: int = 10,
++        rtc_max_guidance_weight: float = 10.0,
++        num_steps: int | None = None,
++    ) -> dict:  # type: ignore[misc]
+         # Make a copy since transformations may modify the inputs in place.
+-        inputs = jax.tree.map(lambda x: x, obs)
++        policy_input = jax.tree.map(lambda x: x, obs)
++        if prev_chunk_left_over is not None:
++            # Feed absolute leftover targets through the exact training-time
++            # transforms. For relative-action policies this re-anchors the
++            # prefix against the latest observed state before normalization.
++            policy_input["actions"] = np.array(prev_chunk_left_over, copy=True)
++        inputs = policy_input
+         inputs = self._input_transform(inputs)
++        transformed_previous = inputs.pop("actions", None) if prev_chunk_left_over is not None else None
+         if not self._is_pytorch_model:
+             # Make a batch and convert to jax.Array.
+             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+@@ -80,12 +97,28 @@ class Policy(BasePolicy):
+ 
+         # Prepare kwargs for sample_actions
+         sample_kwargs = dict(self._sample_kwargs)
++        if num_steps is not None:
++            sample_kwargs["num_steps"] = num_steps
+         if noise is not None:
+             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
+ 
+             if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
+                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
+             sample_kwargs["noise"] = noise
++        if transformed_previous is not None:
++            previous = (
++                torch.from_numpy(np.asarray(transformed_previous)).to(self._pytorch_device)
++                if self._is_pytorch_model
++                else jnp.asarray(transformed_previous)
++            )
++            if previous.ndim == 2:
++                previous = previous[None, ...]
++            sample_kwargs.update(
++                prev_chunk_left_over=previous,
++                inference_delay=inference_delay,
++                execution_horizon=execution_horizon,
++                rtc_max_guidance_weight=rtc_max_guidance_weight,
++            )
+ 
+         observation = _model.Observation.from_dict(inputs)
+         start_time = time.monotonic()
+diff --git a/src/openpi/serving/websocket_policy_server.py b/src/openpi/serving/websocket_policy_server.py
+index bdefa98..fc4e143 100644
+--- a/src/openpi/serving/websocket_policy_server.py
++++ b/src/openpi/serving/websocket_policy_server.py
+@@ -56,9 +56,24 @@ class WebsocketPolicyServer:
+             try:
+                 start_time = time.monotonic()
+                 obs = msgpack_numpy.unpackb(await websocket.recv())
++                noise = obs.pop("__openpi_noise", None)
++                rtc_request = obs.pop("__openpi_rtc", None)
++                num_steps = obs.pop("__openpi_num_steps", None)
+ 
+                 infer_time = time.monotonic()
+-                action = self._policy.infer(obs)
++                infer_kwargs = {}
++                if noise is not None:
++                    infer_kwargs["noise"] = noise
++                if num_steps is not None:
++                    infer_kwargs["num_steps"] = int(num_steps)
++                if rtc_request is not None:
++                    infer_kwargs.update(
++                        prev_chunk_left_over=rtc_request["prev_chunk_left_over"],
++                        inference_delay=int(rtc_request["inference_delay"]),
++                        execution_horizon=int(rtc_request["execution_horizon"]),
++                        rtc_max_guidance_weight=float(rtc_request.get("max_guidance_weight", 10.0)),
++                    )
++                action = self._policy.infer(obs, **infer_kwargs)
+                 infer_time = time.monotonic() - infer_time
+ 
+                 action["server_timing"] = {
+diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
+index 4ca47e1..561d562 100644
+--- a/src/openpi/training/config.py
++++ b/src/openpi/training/config.py
+@@ -20,6 +20,8 @@ import openpi.models.tokenizer as _tokenizer
+ import openpi.policies.aloha_policy as aloha_policy
+ import openpi.policies.droid_policy as droid_policy
+ import openpi.policies.libero_policy as libero_policy
++import openpi.policies.nero_bimanual_policy as nero_bimanual_policy
++import openpi.policies.nero_policy as nero_policy
+ import openpi.shared.download as _download
+ import openpi.shared.normalize as _normalize
+ import openpi.training.droid_rlds_dataset as droid_rlds_dataset
+@@ -90,6 +92,11 @@ class DataConfig:
+     # If true, will use the LeRobot dataset task to define the prompt.
+     prompt_from_task: bool = False
+ 
++    # Optional episode-level split. The manifest must contain train/val/test
++    # episode lists and is applied before any samples are decoded.
++    lerobot_split_manifest: str | None = None
++    lerobot_split: str | None = None
++
+     # Only used for RLDS data loader (ie currently only used for DROID).
+     rlds_data_dir: str | None = None
+     # Action space for DROID dataset.
+@@ -355,6 +362,88 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
+         )
+ 
+ 
++@dataclasses.dataclass(frozen=True)
++class LeRobotNeroDataConfig(DataConfigFactory):
++    """Data pipeline for NERO joint-position demonstrations."""
++
++    @override
++    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
++        repack_transform = _transforms.Group(
++            inputs=[
++                _transforms.RepackTransform(
++                    {
++                        "observation/external_image": "observation.images.external",
++                        "observation/wrist_image": "observation.images.wrist",
++                        "observation/state": "observation.state",
++                        "actions": "action",
++                        "prompt": "prompt",
++                    }
++                )
++            ]
++        )
++        delta_action_mask = _transforms.make_bool_mask(7, -1)
++        data_transforms = _transforms.Group(
++            inputs=[
++                nero_policy.NeroInputs(model_type=model_config.model_type),
++                _transforms.DeltaActions(delta_action_mask),
++            ],
++            outputs=[
++                _transforms.AbsoluteActions(delta_action_mask),
++                nero_policy.NeroOutputs(),
++            ],
++        )
++
++        return dataclasses.replace(
++            self.create_base_config(assets_dirs, model_config),
++            repack_transforms=repack_transform,
++            data_transforms=data_transforms,
++            model_transforms=ModelTransformFactory()(model_config),
++            action_sequence_keys=("action",),
++        )
++
++
++@dataclasses.dataclass(frozen=True)
++class LeRobotNeroBimanualDataConfig(DataConfigFactory):
++    """Data pipeline for dual NERO arms and three RGB cameras."""
++
++    @override
++    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
++        repack_transform = _transforms.Group(
++            inputs=[
++                _transforms.RepackTransform(
++                    {
++                        "observation/world_image": "observation.images.world",
++                        "observation/left_wrist_image": "observation.images.left_wrist",
++                        "observation/right_wrist_image": "observation.images.right_wrist",
++                        "observation/state": "observation.state",
++                        "actions": "action",
++                        "prompt": "prompt",
++                    }
++                )
++            ]
++        )
++        # Joint actions are relative; each arm's gripper remains absolute.
++        delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)
++        data_transforms = _transforms.Group(
++            inputs=[
++                nero_bimanual_policy.NeroBimanualInputs(model_type=model_config.model_type),
++                _transforms.DeltaActions(delta_action_mask),
++            ],
++            outputs=[
++                _transforms.AbsoluteActions(delta_action_mask),
++                nero_bimanual_policy.NeroBimanualOutputs(),
++            ],
++        )
++
++        return dataclasses.replace(
++            self.create_base_config(assets_dirs, model_config),
++            repack_transforms=repack_transform,
++            data_transforms=data_transforms,
++            model_transforms=ModelTransformFactory()(model_config),
++            action_sequence_keys=("action",),
++        )
++
++
+ @dataclasses.dataclass(frozen=True)
+ class RLDSDroidDataConfig(DataConfigFactory):
+     """
+@@ -504,6 +593,9 @@ class TrainConfig:
+     seed: int = 42
+     # Global batch size.
+     batch_size: int = 32
++    # Number of micro-batches accumulated before one optimizer update. This
++    # raises the effective batch size without increasing peak device memory.
++    gradient_accumulation_steps: int = 1
+     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+     # will increase memory and CPU usage.
+     num_workers: int = 2
+@@ -554,6 +646,8 @@ class TrainConfig:
+     def __post_init__(self) -> None:
+         if self.resume and self.overwrite:
+             raise ValueError("Cannot resume and overwrite at the same time.")
++        if self.gradient_accumulation_steps < 1:
++            raise ValueError("gradient_accumulation_steps must be positive")
+ 
+ 
+ # Use `get_config` if you need to get a config by name in your code.
+@@ -761,6 +855,688 @@ _CONFIGS = [
+         pytorch_weight_path="/path/to/your/pytorch_weight_path",
+         num_train_steps=30_000,
+     ),
++    TrainConfig(
++        name="pi05_nero_smoke",
++        exp_name="three_episode_smoke",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_pi05_smoke_v21",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=3,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_pick_water_bottle",
++        exp_name="lora_10000_20260720",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_pick_water_bottle_50_v2",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=10_000,
++        log_interval=10,
++        save_interval=5_000,
++        keep_period=None,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_pick_bottle_calibrated_v2",
++        exp_name="lora_10000_calibrated_20260721",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_pick_bottle_calibrated_50_v2",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=10_000,
++        log_interval=10,
++        save_interval=5_000,
++        keep_period=None,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_pick_bottle_9points_3bottles_v3",
++        exp_name="lora_10000_9points_3bottles_20260724",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_pick_bottle_9points_3bottles_v3",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=10_000,
++        log_interval=10,
++        save_interval=5_000,
++        keep_period=None,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_pick_bottle_single_80_clean_v1",
++        exp_name="lora_12000_single80_clean_20260727",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_pick_bottle_single_bottle_80_v3_clean_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=12_000,
++        log_interval=10,
++        save_interval=12_000,
++        keep_period=None,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_pick_bottle_single_80_clean_6h_v1",
++        exp_name="lora_48000_single80_clean_6h_20260727",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_pick_bottle_single_bottle_80_v3_clean_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=48_000,
++        log_interval=10,
++        save_interval=48_000,
++        keep_period=None,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_pick_bottle_clean60_v1",
++        exp_name="lora_12000_clean60_20260729",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_pick_bottle_clean_full_demo_60_v2",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=12_000,
++        log_interval=10,
++        save_interval=12_000,
++        keep_period=None,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_bottle_box_right60_command_eff4_v1",
++        exp_name="lora_opt30000_bottle_box_right60_command_h16_eff4_v1",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_bottle_into_box_right_60_command_sft_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        gradient_accumulation_steps=4,
++        num_workers=0,
++        num_train_steps=120_000,
++        log_interval=10,
++        save_interval=8_000,
++        keep_period=8_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=30_000,
++            decay_lr=2.5e-6,
++        ),
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_bimanual_50_v1",
++        exp_name="lora_20000_towel_bimanual_50_20260817",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_fold_bimanual_50_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=20_000,
++        log_interval=10,
++        save_interval=4_000,
++        keep_period=4_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_fold_stage_50_h24_v1",
++        exp_name="lora_20000_towel_fold_stage_50_h24_20260819",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_fold_stage_50_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=20_000,
++        log_interval=10,
++        save_interval=4_000,
++        keep_period=4_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_stage23_fold_50_command_h24_v1",
++        exp_name="lora_20000_towel_stage23_fold_50_command_h24_v1",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_stage23_fold_50_command_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=20_000,
++        log_interval=10,
++        save_interval=4_000,
++        keep_period=4_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_stage23_only_50_event35_h24_v1",
++        exp_name="lora_10000_towel_stage23_command_event35_h24_20260821",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_stage23_fold_50_command_event35_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=10_000,
++        log_interval=10,
++        save_interval=2_000,
++        keep_period=2_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_multistage_99_command_event35_h24_v1",
++        exp_name="lora_20000_towel_multistage_99_command_event35_h24_v1",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_multistage_99_command_event35_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=20_000,
++        log_interval=10,
++        save_interval=4_000,
++        keep_period=4_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_multistage_99_next_feedback_event4_h24_v1",
++        exp_name="lora_20000_towel_multistage_99_next_feedback_event4_h24_v1",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_multistage_99_next_feedback_event4_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=20_000,
++        log_interval=10,
++        save_interval=4_000,
++        keep_period=4_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_fullflow_70_command_event4_h24_v1",
++        exp_name="lora_40000_towel_fullflow_70_command_event4_h24_20260822",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_fullflow_70_command_event4_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=40_000,
++        log_interval=10,
++        save_interval=4_000,
++        keep_period=4_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_fullflow_70_next_feedback_event4_h24_v1",
++        exp_name="lora_40000_towel_fullflow_70_next_feedback_event4_h24_20260822",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_fullflow_70_next_feedback_event4_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=40_000,
++        log_interval=10,
++        save_interval=4_000,
++        keep_period=4_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_towel_fullflow_70_next_feedback_event4_h24_split_v2",
++        exp_name="lora_micro96000_towel_fullflow70_next_feedback_h24_eff4_v2",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_fullflow_70_next_feedback_event4_v1",
++            base_config=DataConfig(
++                prompt_from_task=True,
++                lerobot_split_manifest=(
++                    "/home/dev/workspace/nero_training/splits/"
++                    "nero_towel_fullflow_70_next_feedback_event4_v1.seed42.json"
++                ),
++                lerobot_split="train",
++            ),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        gradient_accumulation_steps=4,
++        num_workers=0,
++        num_train_steps=96_000,
++        log_interval=10,
++        # Save every 1k optimizer updates (4k micro-steps). The pipeline keeps
++        # the dense 12k-20k window and removes the other temporary snapshots.
++        save_interval=4_000,
++        keep_period=4_000,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    TrainConfig(
++        name="pi05_nero_intervention_13_v1",
++        exp_name="lora_4000_intervention13_from_single80_12k_20260728",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/nero_intervention_pick_bottle_13_v1",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        num_workers=0,
++        num_train_steps=4_000,
++        log_interval=10,
++        save_interval=4_000,
++        keep_period=None,
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=16,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/nero_training/checkpoints/"
++            "pi05_nero_pick_bottle_single_80_clean_v1/"
++            "lora_12000_single80_clean_20260727/11999/params"
++        ),
++    ),
+     #
+     # Fine-tuning Aloha configs.
+     #
+@@ -965,6 +1741,114 @@ _CONFIGS = [
+         exp_name="debug_pi05",
+         wandb_enabled=False,
+     ),
++    TrainConfig(
++        name="pi05_nero_towel_fullflow_pilot70_next_feedback_event4_h24_split_v3",
++        exp_name="lora_micro96000_towel_fullflow_pilot70_next_feedback_h24_eff4_v3",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_fullflow_pilot70_next_feedback_event4_v1",
++            base_config=DataConfig(
++                prompt_from_task=True,
++                lerobot_split_manifest=(
++                    "/home/dev/workspace/nero_training/splits/"
++                    "nero_towel_fullflow_pilot70_next_feedback_event4_split_v1.json"
++                ),
++                lerobot_split="train",
++            ),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        gradient_accumulation_steps=4,
++        num_workers=0,
++        # 96k micro-steps / accumulation 4 = 24k optimizer updates.
++        num_train_steps=96_000,
++        log_interval=10,
++        # Save every 2k optimizer updates.
++        save_interval=8_000,
++        keep_period=8_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=24_000,
++            decay_lr=2.5e-6,
++        ),
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    #
++    TrainConfig(
++        name="pi05_nero_towel_fullflow70_releasecrop_tailpush30_next_feedback_event4_h24_v1",
++        exp_name="lora_micro120000_towel_fullflow70_releasecrop_tailpush30_next_feedback_h24_eff4_v1",
++        model=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ),
++        data=LeRobotNeroBimanualDataConfig(
++            repo_id="local/nero_towel_fullflow70_releasecrop_tailpush30_next_feedback_event4_v1",
++            base_config=DataConfig(
++                prompt_from_task=True,
++                lerobot_split_manifest=(
++                    "/home/dev/workspace/nero_training/splits/"
++                    "nero_towel_fullflow70_releasecrop_tailpush30_next_feedback_event4_v1.json"
++                ),
++                lerobot_split="train",
++            ),
++        ),
++        assets_base_dir="/home/dev/workspace/nero_training/assets",
++        checkpoint_base_dir="/home/dev/workspace/nero_training/checkpoints",
++        batch_size=1,
++        gradient_accumulation_steps=4,
++        num_workers=0,
++        # 120k microsteps / accumulation 4 = 30k optimizer updates.
++        num_train_steps=120_000,
++        log_interval=10,
++        # 8k microsteps = 2k optimizer updates.
++        save_interval=8_000,
++        keep_period=8_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=30_000,
++            decay_lr=2.5e-6,
++        ),
++        freeze_filter=pi0_config.Pi0Config(
++            pi05=True,
++            action_dim=32,
++            action_horizon=24,
++            discrete_state_input=False,
++            paligemma_variant="gemma_2b_lora",
++            action_expert_variant="gemma_300m_lora",
++        ).get_freeze_filter(),
++        ema_decay=None,
++        wandb_enabled=False,
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "/home/dev/workspace/openpi_deploy/checkpoints/openpi-assets/checkpoints/pi05_base/params"
++        ),
++    ),
++    #
+     # RoboArena & PolaRiS configs.
+     *roboarena_config.get_roboarena_configs(),
+     *polaris_config.get_polaris_configs(),
+diff --git a/src/openpi/training/data_loader.py b/src/openpi/training/data_loader.py
+index e2ee7dd..18c7659 100644
+--- a/src/openpi/training/data_loader.py
++++ b/src/openpi/training/data_loader.py
+@@ -1,4 +1,5 @@
+ from collections.abc import Iterator, Sequence
++import json
+ import logging
+ import multiprocessing
+ import os
+@@ -127,6 +128,23 @@ class FakeDataset(Dataset):
+         return self._num_samples
+ 
+ 
++def repair_lerobot_episode_subset_index(dataset) -> None:
++    """Repair non-contiguous episode lookup in the bundled LeRobot v2.1 loader."""
++    if dataset.episodes is None:
++        return
++    starts = torch.zeros(dataset.meta.total_episodes, dtype=torch.long)
++    ends = torch.zeros(dataset.meta.total_episodes, dtype=torch.long)
++    cursor = 0
++    for episode in dataset.episodes:
++        length = int(dataset.meta.episodes[episode]["length"])
++        starts[episode] = cursor
++        cursor += length
++        ends[episode] = cursor
++    if cursor != len(dataset.hf_dataset):
++        raise RuntimeError(f"LeRobot subset index length mismatch: {cursor} != {len(dataset.hf_dataset)}")
++    dataset.episode_data_index = {"from": starts, "to": ends}
++
++
+ def create_torch_dataset(
+     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+ ) -> Dataset:
+@@ -138,12 +156,41 @@ def create_torch_dataset(
+         return FakeDataset(model_config, num_samples=1024)
+ 
+     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
++    episodes = None
++    if data_config.lerobot_split_manifest is not None:
++        if data_config.lerobot_split is None:
++            raise ValueError("lerobot_split is required when a split manifest is configured")
++        with open(data_config.lerobot_split_manifest) as stream:
++            manifest = json.load(stream)
++        if manifest.get("repo_id") != repo_id:
++            raise ValueError(
++                f"Split manifest repo mismatch: {manifest.get('repo_id')!r} != {repo_id!r}"
++            )
++        splits = manifest.get("splits", {})
++        if data_config.lerobot_split not in splits:
++            raise ValueError(f"Unknown LeRobot split {data_config.lerobot_split!r}")
++        episodes = [int(value) for value in splits[data_config.lerobot_split]]
++        if not episodes:
++            raise ValueError(f"LeRobot split {data_config.lerobot_split!r} is empty")
++        if len(episodes) != len(set(episodes)):
++            raise ValueError(f"LeRobot split {data_config.lerobot_split!r} contains duplicates")
++        if min(episodes) < 0 or max(episodes) >= dataset_meta.total_episodes:
++            raise ValueError(f"LeRobot split {data_config.lerobot_split!r} is out of range")
++        logging.info(
++            "Loading LeRobot split %s with %d episodes from %s",
++            data_config.lerobot_split,
++            len(episodes),
++            data_config.lerobot_split_manifest,
++        )
+     dataset = lerobot_dataset.LeRobotDataset(
+         data_config.repo_id,
++        episodes=episodes,
++        video_backend="pyav",
+         delta_timestamps={
+             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+         },
+     )
++    repair_lerobot_episode_subset_index(dataset)
+ 
+     if data_config.prompt_from_task:
+         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+diff --git a/src/openpi/training/utils.py b/src/openpi/training/utils.py
+index fe7f94d..a05a1ed 100644
+--- a/src/openpi/training/utils.py
++++ b/src/openpi/training/utils.py
+@@ -17,7 +17,7 @@ class TrainState:
+     params: nnx.State
+     model_def: nnx.GraphDef[_model.BaseModel]
+     opt_state: optax.OptState
+-    tx: optax.GradientTransformation = struct.field(pytree_node=False)
++    tx: optax.GradientTransformation | optax.MultiSteps = struct.field(pytree_node=False)
+ 
+     ema_decay: float | None = struct.field(pytree_node=False)
+     ema_params: nnx.State | None = None
+diff --git a/src/openpi/models/rtc.py b/src/openpi/models/rtc.py
+new file mode 100644
+index 0000000..e23b587
+--- /dev/null
++++ b/src/openpi/models/rtc.py
+@@ -0,0 +1,90 @@
++"""Real-Time Chunking guidance for flow-matching action policies.
++
++This is the JAX counterpart of LeRobot's RTCProcessor. It constrains the
++prefix of a newly sampled action chunk toward the unexecuted tail of the
++previous chunk while leaving the suffix free to react to the latest image.
++"""
++
++from collections.abc import Callable
++
++import jax
++import jax.numpy as jnp
++
++
++def linear_prefix_weights(
++    inference_delay: int | jax.Array,
++    execution_horizon: int | jax.Array,
++    total_steps: int,
++    *,
++    dtype: jnp.dtype = jnp.float32,
++) -> jax.Array:
++    """Build the official RTC linear prefix-attention schedule."""
++    indices = jnp.arange(total_steps)
++    start = jnp.clip(jnp.asarray(inference_delay), 0, total_steps)
++    end = jnp.clip(jnp.asarray(execution_horizon), start, total_steps)
++    denominator = jnp.maximum(end - start + 1, 1)
++    ramp = (end - indices) / denominator
++    weights = jnp.where(indices < start, 1.0, jnp.where(indices < end, ramp, 0.0))
++    return weights.astype(dtype)
++
++
++def guided_velocity(
++    denoise_velocity: Callable[[jax.Array], jax.Array],
++    x_t: jax.Array,
++    prev_chunk_left_over: jax.Array,
++    *,
++    inference_delay: int | jax.Array,
++    execution_horizon: int | jax.Array,
++    time: float | jax.Array,
++    max_guidance_weight: float = 10.0,
++) -> jax.Array:
++    """Apply RTC prefix guidance to one flow-matching denoising step."""
++    if prev_chunk_left_over.ndim != x_t.ndim:
++        raise ValueError(
++            "RTC previous chunk must have the same rank as the action latent: "
++            f"previous={prev_chunk_left_over.shape} latent={x_t.shape}"
++        )
++    if (
++        prev_chunk_left_over.shape[0] != x_t.shape[0]
++        or prev_chunk_left_over.shape[1] > x_t.shape[1]
++        or prev_chunk_left_over.shape[2] > x_t.shape[2]
++    ):
++        raise ValueError(
++            "RTC previous chunk does not fit the action latent: "
++            f"previous={prev_chunk_left_over.shape} latent={x_t.shape}"
++        )
++    if prev_chunk_left_over.shape != x_t.shape:
++        padded_previous = jnp.zeros_like(x_t)
++        prev_chunk_left_over = padded_previous.at[
++            :, : prev_chunk_left_over.shape[1], : prev_chunk_left_over.shape[2]
++        ].set(prev_chunk_left_over)
++
++    time_value = jnp.asarray(time, dtype=x_t.dtype)
++
++    def endpoint(input_x_t: jax.Array) -> jax.Array:
++        return input_x_t - time_value * denoise_velocity(input_x_t)
++
++    x1_t, endpoint_pullback = jax.vjp(endpoint, x_t)
++    weights = linear_prefix_weights(
++        inference_delay,
++        execution_horizon,
++        x_t.shape[1],
++        dtype=x_t.dtype,
++    )[None, :, None]
++    error = (prev_chunk_left_over - x1_t) * weights
++    correction = endpoint_pullback(error)[0]
++
++    tau = 1.0 - time_value
++    squared_one_minus_tau = (1.0 - tau) ** 2
++    inv_r2 = (squared_one_minus_tau + tau**2) / squared_one_minus_tau
++    coefficient = (1.0 - tau) / tau
++    guidance_weight = jnp.nan_to_num(
++        coefficient * inv_r2,
++        nan=0.0,
++        posinf=max_guidance_weight,
++        neginf=0.0,
++    )
++    guidance_weight = jnp.minimum(guidance_weight, max_guidance_weight)
++
++    base_velocity = (x_t - x1_t) / time_value
++    return base_velocity - guidance_weight * correction
+diff --git a/src/openpi/policies/nero_policy.py b/src/openpi/policies/nero_policy.py
+new file mode 100644
+index 0000000..2fcc389
+--- /dev/null
++++ b/src/openpi/policies/nero_policy.py
+@@ -0,0 +1,49 @@
++import dataclasses
++
++import einops
++import numpy as np
++
++from openpi import transforms
++from openpi.models import model as _model
++
++
++def _parse_image(image) -> np.ndarray:
++    image = np.asarray(image)
++    if np.issubdtype(image.dtype, np.floating):
++        image = (255 * image).astype(np.uint8)
++    if image.shape[0] == 3:
++        image = einops.rearrange(image, "c h w -> h w c")
++    return image
++
++
++@dataclasses.dataclass(frozen=True)
++class NeroInputs(transforms.DataTransformFn):
++    model_type: _model.ModelType
++
++    def __call__(self, data: dict) -> dict:
++        external_image = _parse_image(data["observation/external_image"])
++        wrist_image = _parse_image(data["observation/wrist_image"])
++        inputs = {
++            "state": data["observation/state"],
++            "image": {
++                "base_0_rgb": external_image,
++                "left_wrist_0_rgb": wrist_image,
++                "right_wrist_0_rgb": np.zeros_like(external_image),
++            },
++            "image_mask": {
++                "base_0_rgb": np.True_,
++                "left_wrist_0_rgb": np.True_,
++                "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
++            },
++        }
++        if "actions" in data:
++            inputs["actions"] = data["actions"]
++        if "prompt" in data:
++            inputs["prompt"] = data["prompt"]
++        return inputs
++
++
++@dataclasses.dataclass(frozen=True)
++class NeroOutputs(transforms.DataTransformFn):
++    def __call__(self, data: dict) -> dict:
++        return {"actions": np.asarray(data["actions"][..., :8])}
+diff --git a/src/openpi/policies/nero_bimanual_policy.py b/src/openpi/policies/nero_bimanual_policy.py
+new file mode 100644
+index 0000000..9d57cc8
+--- /dev/null
++++ b/src/openpi/policies/nero_bimanual_policy.py
+@@ -0,0 +1,49 @@
++import dataclasses
++
++import einops
++import numpy as np
++
++from openpi import transforms
++from openpi.models import model as _model
++
++
++def _parse_image(image) -> np.ndarray:
++    image = np.asarray(image)
++    if np.issubdtype(image.dtype, np.floating):
++        image = (255 * image).astype(np.uint8)
++    if image.shape[0] == 3:
++        image = einops.rearrange(image, "c h w -> h w c")
++    return image
++
++
++@dataclasses.dataclass(frozen=True)
++class NeroBimanualInputs(transforms.DataTransformFn):
++    """Map three-camera, 16-DoF NERO samples to the pi0.5 input schema."""
++
++    model_type: _model.ModelType
++
++    def __call__(self, data: dict) -> dict:
++        inputs = {
++            "state": data["observation/state"],
++            "image": {
++                "base_0_rgb": _parse_image(data["observation/world_image"]),
++                "left_wrist_0_rgb": _parse_image(data["observation/left_wrist_image"]),
++                "right_wrist_0_rgb": _parse_image(data["observation/right_wrist_image"]),
++            },
++            "image_mask": {
++                "base_0_rgb": np.True_,
++                "left_wrist_0_rgb": np.True_,
++                "right_wrist_0_rgb": np.True_,
++            },
++        }
++        if "actions" in data:
++            inputs["actions"] = data["actions"]
++        if "prompt" in data:
++            inputs["prompt"] = data["prompt"]
++        return inputs
++
++
++@dataclasses.dataclass(frozen=True)
++class NeroBimanualOutputs(transforms.DataTransformFn):
++    def __call__(self, data: dict) -> dict:
++        return {"actions": np.asarray(data["actions"][..., :16])}

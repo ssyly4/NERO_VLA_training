@@ -90,6 +90,14 @@ NERO 适配代码。
 | `install_bottle_box_config.py` | 将已经训练完成的抓瓶放箱配置幂等注册到服务器 OpenPI `config.py`，供通用 `serve_policy.py` 加载。 |
 | `run_right_bottle_pi05_154.sh` | `.154` 训练服务器专用托管脚本；等待数据转换、建立 LeRobot 缓存链接、计算归一化统计、启动训练并记录状态。 |
 
+### `server/openpi/`
+
+| 文件 | 作用 |
+|---|---|
+| `nero_openpi_core_15a9616.patch` | 基于官方 OpenPI `15a9616` 的 NERO 核心补丁，包含数据适配、RTC、episode split 和梯度累积。 |
+| `apply_openpi_core.sh` | 检查 OpenPI 基线并幂等应用核心补丁。 |
+| `verify_openpi_core.sh` | 在 OpenPI `uv` 环境中导入并验证四项核心能力。 |
+
 ### `docs/`
 
 | 文件 | 作用 |
