@@ -202,9 +202,15 @@ nero_openpi_core
 ```bash
 docker exec -i nero_openpi_core bash -lc '
   cd /home/dev/workspace/openpi_deploy/repos/openpi
+  uv venv --python python3 .venv
   GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 '
 ```
+
+`uv pip install` 不会自动创建虚拟环境。首次安装必须先执行 `uv venv`。GitHub Git
+依赖或 Torch 大 wheel 在弱网络下失败时，使用
+[`OPENPI_PI05_REPRO_COMMANDS.zh-CN.md`](OPENPI_PI05_REPRO_COMMANDS.zh-CN.md)
+中的 codeload、本地 override 和可续传 wheel 流程。
 
 如果服务器访问 GitHub 依赖需要本机代理，实际部署使用过：
 
@@ -231,9 +237,12 @@ dlimp    ad72ce3a9b414db2185bc0b38461d4101a65477a
 ```bash
 docker exec -i nero_openpi_core bash -lc '
   cd /home/dev/workspace/openpi_deploy/repos/openpi
-  uv run python -c "import openpi, jax; print(jax.devices())"
+  .venv/bin/python -c "import openpi, jax; print(jax.devices())"
 '
 ```
+
+若环境使用了本地 dependency override，不要直接执行 `uv run python`，因为它会按
+`uv.lock` 自动同步；应使用 `.venv/bin/python` 或 `uv run --no-sync python`。
 
 ### 2.6 下载官方 π0.5 基础权重
 
@@ -259,10 +268,10 @@ docker exec -i nero_openpi_core bash -lc '
   uv run python -c "
 from openpi.shared import download
 print(download.maybe_download(
-    \"gs://openpi-assets/checkpoints/pi05_base/params\"
+    \"gs://openpi-assets/checkpoints/pi05_base/params\", token=\"anon\"
 ))
 print(download.maybe_download(
-    \"gs://openpi-assets/checkpoints/pi05_base/assets\"
+    \"gs://openpi-assets/checkpoints/pi05_base/assets\", token=\"anon\"
 ))
 "
 '

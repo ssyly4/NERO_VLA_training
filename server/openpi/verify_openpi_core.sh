@@ -26,7 +26,14 @@ for path in "${required[@]}"; do
 done
 
 cd "$OPENPI_ROOT"
-uv run python - <<'PY'
+if [[ -x "$OPENPI_ROOT/.venv/bin/python" ]]; then
+  python_cmd=("$OPENPI_ROOT/.venv/bin/python")
+else
+  # Do not let verification mutate a working environment by syncing uv.lock.
+  python_cmd=(uv run --no-sync python)
+fi
+
+"${python_cmd[@]}" - <<'PY'
 import inspect
 
 from openpi.models import pi0
